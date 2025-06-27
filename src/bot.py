@@ -2,6 +2,8 @@ import discord
 from discord.ext import commands
 import os
 import logging
+import asyncio
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 # Set up logging
@@ -43,107 +45,83 @@ questions = [
     "Any additional comments/questions?",
 ]
 
-class ApplicationModal(discord.ui.Modal):
-    def __init__(self):
-        super().__init__(title="Guild Application")
-        
-        # Add all questions as text inputs (Discord allows up to 5 components per modal)
-        self.q1 = discord.ui.TextInput(
-            label=questions[0][:45] + "..." if len(questions[0]) > 45 else questions[0],
-            placeholder="Weekday/Weekend/Floater",
-            max_length=500
-        )
-        self.q2 = discord.ui.TextInput(
-            label=questions[1][:45] + "..." if len(questions[1]) > 45 else questions[1],
-            placeholder="Yes/No",
-            max_length=500
-        )
-        self.q3 = discord.ui.TextInput(
-            label=questions[2][:45] + "..." if len(questions[2]) > 45 else questions[2],
-            placeholder="Class/spec/role preference",
-            max_length=500
-        )
-        self.q4 = discord.ui.TextInput(
-            label=questions[3][:45] + "..." if len(questions[3]) > 45 else questions[3],
-            placeholder="Warcraft Logs URL",
-            max_length=500
-        )
-        self.q5 = discord.ui.TextInput(
-            label=questions[4][:45] + "..." if len(questions[4]) > 45 else questions[4],
-            placeholder="Friends/family in guild",
-            max_length=500
-        )
-        
-        self.add_item(self.q1)
-        self.add_item(self.q2)
-        self.add_item(self.q3)
-        self.add_item(self.q4)
-        self.add_item(self.q5)
+# Store ongoing applications
+ongoing_applications = {}
 
-    async def on_submit(self, interaction: discord.Interaction):
-        # Store answers for the second modal
-        answers_part1 = [
-            self.q1.value,
-            self.q2.value,
-            self.q3.value,
-            self.q4.value,
-            self.q5.value,
-        ]
-        
-        # Send second modal for remaining questions
-        second_modal = ApplicationModalPart2(answers_part1, interaction.user)
-        await interaction.response.send_modal(second_modal)
-
-class ApplicationModalPart2(discord.ui.Modal):
-    def __init__(self, previous_answers, user):
-        super().__init__(title="Guild Application (Part 2)")
-        self.previous_answers = previous_answers
+class ApplicationHandler:
+    def __init__(self, user, guild):
         self.user = user
+        self.guild = guild
+        self.answers = []
+        self.current_question = 0
         
-        # Add remaining questions
-        self.q6 = discord.ui.TextInput(
-            label=questions[5][:45] + "..." if len(questions[5]) > 45 else questions[5],
-            placeholder="Tell us about your raiding experience",
-            style=discord.TextStyle.paragraph,
-            max_length=2000
-        )
-        self.q7 = discord.ui.TextInput(
-            label=questions[6][:45] + "..." if len(questions[6]) > 45 else questions[6],
-            placeholder="Any additional comments",
-            style=discord.TextStyle.paragraph,
-            max_length=1000
-        )
-        
-        self.add_item(self.q6)
-        self.add_item(self.q7)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        # Combine all answers
-        all_answers = self.previous_answers + [self.q6.value, self.q7.value]
-        
-        # Create application channel
-        await self.create_application_channel(interaction, all_answers)
-
-    async def create_application_channel(self, interaction, answers):
+    async def start_application(self):
+        """Start the application process by sending the first question"""
         try:
-            guild = interaction.guild
+            await self.send_current_question()
+        except discord.Forbidden:
+            logger.error(f"Cannot send DM to {self.user.display_name}")
+            return False
+        return True
+    
+    async def send_current_question(self):
+        """Send the current question to the user"""
+        if self.current_question < len(questions):
+            question_num = self.current_question + 1
+            question = questions[self.current_question]
             
+            embed = discord.Embed(
+                title=f"Guild Application - Question {question_num}/{len(questions)}",
+                description=question,
+                color=discord.Color.blue()
+            )
+            embed.set_footer(text="Please respond with your answer. Type 'cancel' to cancel the application.")
+            
+            await self.user.send(embed=embed)
+        else:
+            await self.complete_application()
+    
+    async def process_answer(self, message):
+        """Process the user's answer and move to next question"""
+        if message.content.lower() == 'cancel':
+            await self.cancel_application()
+            return
+        
+        # Store the answer
+        self.answers.append(message.content)
+        self.current_question += 1
+        
+        if self.current_question < len(questions):
+            await self.send_current_question()
+        else:
+            await self.complete_application()
+    
+    async def cancel_application(self):
+        """Cancel the application process"""
+        embed = discord.Embed(
+            title="Application Cancelled",
+            description="Your guild application has been cancelled. You can start a new application anytime by clicking the Apply button again.",
+            color=discord.Color.red()
+        )
+        await self.user.send(embed=embed)
+        
+        # Remove from ongoing applications
+        if self.user.id in ongoing_applications:
+            del ongoing_applications[self.user.id]
+    
+    async def complete_application(self):
+        """Complete the application and create the channel"""
+        try:
             # Validate category
             if INTERVIEW_CATEGORY_ID is None:
-                await interaction.response.send_message(
-                    "Interview category not configured. Please contact an officer.",
-                    ephemeral=True,
-                )
+                await self.user.send("❌ Interview category not configured. Please contact an officer.")
                 return
             
             category_id = int(INTERVIEW_CATEGORY_ID)
-            category = guild.get_channel(category_id)
+            category = self.guild.get_channel(category_id)
             
             if not category or not isinstance(category, discord.CategoryChannel):
-                await interaction.response.send_message(
-                    "Interview category not found. Please contact an officer.",
-                    ephemeral=True,
-                )
+                await self.user.send("❌ Interview category not found. Please contact an officer.")
                 return
             
             # Create channel name
@@ -151,14 +129,14 @@ class ApplicationModalPart2(discord.ui.Modal):
             
             # Set up permissions
             overwrites = {
-                guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                self.guild.default_role: discord.PermissionOverwrite(read_messages=False),
                 self.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
             }
             
             # Add officer role access if configured
             if OFFICER_ROLE_ID:
                 try:
-                    officer_role = guild.get_role(int(OFFICER_ROLE_ID))
+                    officer_role = self.guild.get_role(int(OFFICER_ROLE_ID))
                     if officer_role:
                         overwrites[officer_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
                         logger.info(f"Added officer role {officer_role.name} to application channel permissions")
@@ -170,7 +148,7 @@ class ApplicationModalPart2(discord.ui.Modal):
             # Add admin role access if configured
             if ADMIN_ROLE_ID:
                 try:
-                    admin_role = guild.get_role(int(ADMIN_ROLE_ID))
+                    admin_role = self.guild.get_role(int(ADMIN_ROLE_ID))
                     if admin_role:
                         overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
                         logger.info(f"Added admin role {admin_role.name} to application channel permissions")
@@ -180,7 +158,7 @@ class ApplicationModalPart2(discord.ui.Modal):
                     logger.error(f"Invalid ADMIN_ROLE_ID: {ADMIN_ROLE_ID} (must be numeric)")
             
             # Create the channel
-            interview_channel = await guild.create_text_channel(
+            interview_channel = await self.guild.create_text_channel(
                 name=channel_name,
                 category=category,
                 overwrites=overwrites,
@@ -193,32 +171,32 @@ class ApplicationModalPart2(discord.ui.Modal):
             )
             
             for i, question in enumerate(questions):
-                embed.add_field(name=question, value=answers[i], inline=False)
+                embed.add_field(name=f"Q{i+1}: {question}", value=self.answers[i], inline=False)
             
             embed.set_footer(text=f"Application submitted by {self.user} ({self.user.id})")
             
             await interview_channel.send(embed=embed)
             
-            # Notify user
-            await interaction.response.send_message(
-                f"✅ Your application has been submitted successfully! Your application channel: {interview_channel.mention}",
-                ephemeral=True,
+            # Notify user of completion
+            completion_embed = discord.Embed(
+                title="✅ Application Submitted Successfully!",
+                description=f"Your guild application has been submitted and reviewed by our officers.\n\nYour application channel: {interview_channel.mention}",
+                color=discord.Color.green()
             )
+            await self.user.send(embed=completion_embed)
             
             logger.info(f"Application completed for {self.user.display_name} ({self.user.id})")
             
         except discord.Forbidden:
-            await interaction.response.send_message(
-                "❌ I don't have permission to create channels. Please contact an administrator.",
-                ephemeral=True,
-            )
+            await self.user.send("❌ I don't have permission to create channels. Please contact an administrator.")
             logger.error(f"Permission denied when creating application channel for {self.user.display_name}")
         except Exception as e:
-            await interaction.response.send_message(
-                "❌ There was an error processing your application. Please contact an administrator.",
-                ephemeral=True,
-            )
+            await self.user.send("❌ There was an error processing your application. Please contact an administrator.")
             logger.error(f"Error completing application for {self.user.display_name}: {e}")
+        finally:
+            # Remove from ongoing applications
+            if self.user.id in ongoing_applications:
+                del ongoing_applications[self.user.id]
 
 class ApplicationView(discord.ui.View):
     def __init__(self):
@@ -240,9 +218,45 @@ class ApplicationView(discord.ui.View):
                 )
                 return
         
-        # Send the application modal
-        modal = ApplicationModal()
-        await interaction.response.send_modal(modal)
+        # Check if user already has an ongoing application
+        if user.id in ongoing_applications:
+            await interaction.response.send_message(
+                "You already have an application in progress. Please check your DMs to continue, or type 'cancel' to start over.",
+                ephemeral=True
+            )
+            return
+        
+        # Start the application process
+        application_handler = ApplicationHandler(user, guild)
+        ongoing_applications[user.id] = application_handler
+        
+        success = await application_handler.start_application()
+        
+        if success:
+            await interaction.response.send_message(
+                "✅ Application started! Please check your DMs to continue with the questions.",
+                ephemeral=True
+            )
+        else:
+            # Remove from ongoing applications if failed to start
+            if user.id in ongoing_applications:
+                del ongoing_applications[user.id]
+            await interaction.response.send_message(
+                "❌ I couldn't send you a DM. Please make sure your DMs are open and try again.",
+                ephemeral=True
+            )
+
+async def schedule_channel_deletion(channel, delay_hours=24):
+    """Schedule a channel for deletion after a specified delay"""
+    try:
+        await asyncio.sleep(delay_hours * 3600)  # Convert hours to seconds
+        if channel and not channel.is_deleted():
+            await channel.delete(reason="Application rejected - automatic cleanup")
+            logger.info(f"Deleted rejected application channel: {channel.name}")
+    except discord.NotFound:
+        logger.info(f"Channel {channel.name} was already deleted")
+    except Exception as e:
+        logger.error(f"Error deleting channel {channel.name}: {e}")
 
 @bot.tree.command(name="post_application", description="Post the guild application button (Admin only)")
 @discord.app_commands.default_permissions(administrator=True)
@@ -255,9 +269,328 @@ async def post_application(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed, view=ApplicationView())
 
+@bot.tree.command(name="sync_commands", description="Force sync slash commands (Admin only)")
+@discord.app_commands.default_permissions(administrator=True)
+async def sync_commands(interaction: discord.Interaction):
+    try:
+        synced = await bot.tree.sync()
+        await interaction.response.send_message(
+            f"✅ Successfully synced {len(synced)} slash commands!",
+            ephemeral=True
+        )
+        logger.info(f"Manual sync completed by {interaction.user.display_name}: {len(synced)} commands synced")
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ Failed to sync commands: {str(e)}",
+            ephemeral=True
+        )
+        logger.error(f"Manual sync failed: {e}")
+
+@bot.tree.command(name="reject", description="Reject an application")
+@discord.app_commands.describe(
+    reason="Reason for rejection (optional)",
+    delete_hours="Hours until channel deletion (optional - if not specified, channel stays)"
+)
+async def reject_application(
+    interaction: discord.Interaction,
+    reason: str = "No reason provided",
+    delete_hours: int | None = None
+):
+    # Ensure this is used in a guild
+    if not interaction.guild:
+        await interaction.response.send_message(
+            "❌ This command can only be used in a server.",
+            ephemeral=True
+        )
+        return
+    
+    # Ensure user is a Member (not just User)
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message(
+            "❌ This command can only be used by server members.",
+            ephemeral=True
+        )
+        return
+    
+    # Check if user has permission (officer or admin role)
+    user_roles = [role.id for role in interaction.user.roles]
+    has_permission = False
+    
+    if interaction.user.guild_permissions.administrator:
+        has_permission = True
+    elif OFFICER_ROLE_ID and int(OFFICER_ROLE_ID) in user_roles:
+        has_permission = True
+    elif ADMIN_ROLE_ID and int(ADMIN_ROLE_ID) in user_roles:
+        has_permission = True
+    
+    if not has_permission:
+        await interaction.response.send_message(
+            "❌ You don't have permission to reject applications. Only officers and administrators can use this command.",
+            ephemeral=True
+        )
+        return
+    
+    # Check if this is an application channel
+    channel = interaction.channel
+    if not isinstance(channel, discord.TextChannel):
+        await interaction.response.send_message(
+            "❌ This command can only be used in text channels.",
+            ephemeral=True
+        )
+        return
+    
+    if not channel.name.startswith(APPLICATION_CHANNEL_PREFIX):
+        await interaction.response.send_message(
+            f"❌ This command can only be used in application channels (channels starting with '{APPLICATION_CHANNEL_PREFIX}').",
+            ephemeral=True
+        )
+        return
+    
+    # Validate delete_hours if provided
+    if delete_hours is not None:
+        if delete_hours < 1 or delete_hours > 168:  # Max 1 week
+            await interaction.response.send_message(
+                "❌ Delete hours must be between 1 and 168 hours (1 week).",
+                ephemeral=True
+            )
+            return
+    
+    # Extract applicant name from channel name
+    applicant_name = channel.name.replace(f"{APPLICATION_CHANNEL_PREFIX}-", "").replace("-", " ").title()
+    
+    # Create rejection embed
+    rejection_embed = discord.Embed(
+        title="❌ Application Rejected",
+        description=f"**Applicant:** {applicant_name}\n**Reason:** {reason}\n**Rejected by:** {interaction.user.mention}",
+        color=discord.Color.red(),
+        timestamp=datetime.utcnow()
+    )
+    
+    if delete_hours is not None:
+        deletion_time = datetime.utcnow() + timedelta(hours=delete_hours)
+        rejection_embed.add_field(
+            name="Channel Deletion",
+            value=f"This channel will be automatically deleted in {delete_hours} hours (<t:{int(deletion_time.timestamp())}:R>)",
+            inline=False
+        )
+    else:
+        rejection_embed.add_field(
+            name="Channel Status",
+            value="This channel will remain open for further discussion.",
+            inline=False
+        )
+    
+    await interaction.response.send_message(embed=rejection_embed)
+    
+    # Try to notify the applicant via DM
+    try:
+        # Find the applicant by looking for them in channel permissions
+        applicant = None
+        for overwrite in channel.overwrites:
+            if isinstance(overwrite, discord.Member) and overwrite != interaction.guild.me:
+                # Check if this member has specific permissions (not a role)
+                if channel.overwrites[overwrite].read_messages is True:
+                    applicant = overwrite
+                    break
+        
+        if applicant:
+            dm_embed = discord.Embed(
+                title="Application Update",
+                description=f"Your application to **{interaction.guild.name}** has been reviewed.",
+                color=discord.Color.red()
+            )
+            dm_embed.add_field(name="Status", value="❌ Rejected", inline=True)
+            dm_embed.add_field(name="Reason", value=reason, inline=False)
+            dm_embed.add_field(
+                name="What's Next?",
+                value="You're welcome to apply again in the future. Feel free to reach out to our officers if you have any questions.",
+                inline=False
+            )
+            
+            await applicant.send(embed=dm_embed)
+            logger.info(f"Sent rejection notification to {applicant.display_name}")
+        else:
+            logger.warning(f"Could not find applicant for channel {channel.name}")
+            
+    except discord.Forbidden:
+        logger.warning(f"Could not send DM to applicant for channel {channel.name}")
+    except Exception as e:
+        logger.error(f"Error sending rejection DM: {e}")
+    
+    # Schedule channel deletion if requested
+    if delete_hours is not None:
+        asyncio.create_task(schedule_channel_deletion(channel, delete_hours))
+        logger.info(f"Application rejected by {interaction.user.display_name} in {channel.name}. Channel scheduled for deletion in {delete_hours} hours.")
+    else:
+        logger.info(f"Application rejected by {interaction.user.display_name} in {channel.name}. Channel will remain open.")
+
+@bot.tree.command(name="approve", description="Approve an application")
+@discord.app_commands.describe(
+    welcome_message="Custom welcome message (optional)",
+    delete_hours="Hours until channel deletion (optional - if not specified, channel stays)"
+)
+async def approve_application(
+    interaction: discord.Interaction,
+    welcome_message: str = "Welcome to the guild! We're excited to have you join us.",
+    delete_hours: int | None = None
+):
+    # Ensure this is used in a guild
+    if not interaction.guild:
+        await interaction.response.send_message(
+            "❌ This command can only be used in a server.",
+            ephemeral=True
+        )
+        return
+    
+    # Ensure user is a Member (not just User)
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message(
+            "❌ This command can only be used by server members.",
+            ephemeral=True
+        )
+        return
+    
+    # Check if user has permission (officer or admin role)
+    user_roles = [role.id for role in interaction.user.roles]
+    has_permission = False
+    
+    if interaction.user.guild_permissions.administrator:
+        has_permission = True
+    elif OFFICER_ROLE_ID and int(OFFICER_ROLE_ID) in user_roles:
+        has_permission = True
+    elif ADMIN_ROLE_ID and int(ADMIN_ROLE_ID) in user_roles:
+        has_permission = True
+    
+    if not has_permission:
+        await interaction.response.send_message(
+            "❌ You don't have permission to accept applications. Only officers and administrators can use this command.",
+            ephemeral=True
+        )
+        return
+    
+    # Check if this is an application channel
+    channel = interaction.channel
+    if not isinstance(channel, discord.TextChannel):
+        await interaction.response.send_message(
+            "❌ This command can only be used in text channels.",
+            ephemeral=True
+        )
+        return
+    
+    if not channel.name.startswith(APPLICATION_CHANNEL_PREFIX):
+        await interaction.response.send_message(
+            f"❌ This command can only be used in application channels (channels starting with '{APPLICATION_CHANNEL_PREFIX}').",
+            ephemeral=True
+        )
+        return
+    
+    # Validate delete_hours if provided
+    if delete_hours is not None:
+        if delete_hours < 1 or delete_hours > 168:  # Max 1 week
+            await interaction.response.send_message(
+                "❌ Delete hours must be between 1 and 168 hours (1 week).",
+                ephemeral=True
+            )
+            return
+    
+    # Extract applicant name from channel name
+    applicant_name = channel.name.replace(f"{APPLICATION_CHANNEL_PREFIX}-", "").replace("-", " ").title()
+    
+    # Create acceptance embed
+    acceptance_embed = discord.Embed(
+        title="✅ Application Approved",
+        description=f"**Applicant:** {applicant_name}\n**Approved by:** {interaction.user.mention}",
+        color=discord.Color.green(),
+        timestamp=datetime.utcnow()
+    )
+    
+    acceptance_embed.add_field(
+        name="Welcome Message",
+        value=welcome_message,
+        inline=False
+    )
+    
+    if delete_hours is not None:
+        deletion_time = datetime.utcnow() + timedelta(hours=delete_hours)
+        acceptance_embed.add_field(
+            name="Channel Deletion",
+            value=f"This channel will be automatically deleted in {delete_hours} hours (<t:{int(deletion_time.timestamp())}:R>)",
+            inline=False
+        )
+    else:
+        acceptance_embed.add_field(
+            name="Channel Status",
+            value="This channel will remain open for further discussion.",
+            inline=False
+        )
+    
+    await interaction.response.send_message(embed=acceptance_embed)
+    
+    # Try to notify the applicant via DM
+    try:
+        # Find the applicant by looking for them in channel permissions
+        applicant = None
+        for overwrite in channel.overwrites:
+            if isinstance(overwrite, discord.Member) and overwrite != interaction.guild.me:
+                # Check if this member has specific permissions (not a role)
+                if channel.overwrites[overwrite].read_messages is True:
+                    applicant = overwrite
+                    break
+        
+        if applicant:
+            dm_embed = discord.Embed(
+                title="🎉 Application Approved!",
+                description=f"Congratulations! Your application to **{interaction.guild.name}** has been approved!",
+                color=discord.Color.green()
+            )
+            dm_embed.add_field(name="Status", value="✅ Approved", inline=True)
+            dm_embed.add_field(name="Welcome Message", value=welcome_message, inline=False)
+            dm_embed.add_field(
+                name="What's Next?",
+                value="You should now have access to the guild! Check out the guild channels and feel free to introduce yourself.",
+                inline=False
+            )
+            
+            await applicant.send(embed=dm_embed)
+            logger.info(f"Sent approval notification to {applicant.display_name}")
+        else:
+            logger.warning(f"Could not find applicant for channel {channel.name}")
+            
+    except discord.Forbidden:
+        logger.warning(f"Could not send DM to applicant for channel {channel.name}")
+    except Exception as e:
+        logger.error(f"Error sending approval DM: {e}")
+    
+    # Schedule channel deletion if requested
+    if delete_hours is not None:
+        asyncio.create_task(schedule_channel_deletion(channel, delete_hours))
+        logger.info(f"Application approved by {interaction.user.display_name} in {channel.name}. Channel scheduled for deletion in {delete_hours} hours.")
+    else:
+        logger.info(f"Application approved by {interaction.user.display_name} in {channel.name}. Channel will remain open.")
+
+@bot.event
+async def on_message(message):
+    # Ignore messages from bots
+    if message.author.bot:
+        return
+    
+    # Process DM messages for ongoing applications
+    if isinstance(message.channel, discord.DMChannel):
+        user_id = message.author.id
+        if user_id in ongoing_applications:
+            application_handler = ongoing_applications[user_id]
+            await application_handler.process_answer(message)
+            return
+    
+    # Process commands
+    await bot.process_commands(message)
+
 @bot.event
 async def on_ready():
-    logger.info(f'Bot logged in as {bot.user.name} (ID: {bot.user.id})')
+    if bot.user:
+        logger.info(f'Bot logged in as {bot.user.name} (ID: {bot.user.id})')
+    else:
+        logger.info('Bot logged in')
     
     # Sync slash commands
     try:
