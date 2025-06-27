@@ -258,7 +258,7 @@ async def schedule_channel_deletion(channel, delay_hours=24):
     except Exception as e:
         logger.error(f"Error deleting channel {channel.name}: {e}")
 
-@bot.tree.command(name="post_application", description="Post the guild application button (Admin only)")
+@bot.tree.command(name="noxpost", description="Post the guild application button (Admin only)")
 @discord.app_commands.default_permissions(administrator=True)
 async def post_application(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -269,7 +269,7 @@ async def post_application(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed, view=ApplicationView())
 
-@bot.tree.command(name="sync_commands", description="Force sync slash commands (Admin only)")
+@bot.tree.command(name="noxsync", description="Force sync slash commands (Admin only)")
 @discord.app_commands.default_permissions(administrator=True)
 async def sync_commands(interaction: discord.Interaction):
     try:
@@ -286,7 +286,7 @@ async def sync_commands(interaction: discord.Interaction):
         )
         logger.error(f"Manual sync failed: {e}")
 
-@bot.tree.command(name="reject", description="Reject an application")
+@bot.tree.command(name="noxreject", description="Reject an application")
 @discord.app_commands.describe(
     reason="Reason for rejection (optional)",
     delete_hours="Hours until channel deletion (optional - if not specified, channel stays)"
@@ -424,7 +424,7 @@ async def reject_application(
     else:
         logger.info(f"Application rejected by {interaction.user.display_name} in {channel.name}. Channel will remain open.")
 
-@bot.tree.command(name="approve", description="Approve an application")
+@bot.tree.command(name="noxapprove", description="Approve an application")
 @discord.app_commands.describe(
     welcome_message="Custom welcome message (optional)",
     delete_hours="Hours until channel deletion (optional - if not specified, channel stays)"
