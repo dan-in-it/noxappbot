@@ -250,13 +250,13 @@ async def schedule_channel_deletion(channel, delay_hours=24):
     """Schedule a channel for deletion after a specified delay"""
     try:
         await asyncio.sleep(delay_hours * 3600)  # Convert hours to seconds
-        if channel and not channel.is_deleted():
-            await channel.delete(reason="Application rejected - automatic cleanup")
-            logger.info(f"Deleted rejected application channel: {channel.name}")
+        if channel:
+            await channel.delete(reason="Application processed - automatic cleanup")
+            logger.info(f"Deleted application channel: {channel.name}")
     except discord.NotFound:
-        logger.info(f"Channel {channel.name} was already deleted")
+        logger.info(f"Channel was already deleted")
     except Exception as e:
-        logger.error(f"Error deleting channel {channel.name}: {e}")
+        logger.error(f"Error deleting channel: {e}")
 
 @bot.tree.command(name="noxpost", description="Post the guild application button (Admin only)")
 @discord.app_commands.default_permissions(administrator=True)
