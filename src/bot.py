@@ -1,7 +1,12 @@
 import discord
 from discord.ext import commands
 import os
+import logging
 from dotenv import load_dotenv
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -29,29 +34,45 @@ questions = [
 ]
 
 # Temporary storage for answers between modal submissions
+# Using a dict with automatic cleanup to prevent memory leaks
 partial_answers = {}
+
+def cleanup_partial_answers():
+    """Clean up old partial answers to prevent memory leaks"""
+    import time
+    current_time = time.time()
+    to_remove = []
+    for user_id, data in partial_answers.items():
+        if isinstance(data, dict) and current_time - data.get('timestamp', 0) > 3600:  # 1 hour timeout
+            to_remove.append(user_id)
+    for user_id in to_remove:
+        partial_answers.pop(user_id, None)
 
 
 class ApplicationModalPart1(discord.ui.Modal):
     def __init__(self, member: discord.Member):
         super().__init__(title="Guild Application (1/2)")
         self.member = member
-        self.q1 = discord.ui.TextInput(label=questions[0])
-        self.q2 = discord.ui.TextInput(label=questions[1])
-        self.q3 = discord.ui.TextInput(label=questions[2])
-        self.q4 = discord.ui.TextInput(label=questions[3])
-        self.q5 = discord.ui.TextInput(label=questions[4])
+        self.q1 = discord.ui.TextInput(label=questions[0], max_length=1000)
+        self.q2 = discord.ui.TextInput(label=questions[1], max_length=1000)
+        self.q3 = discord.ui.TextInput(label=questions[2], max_length=1000)
+        self.q4 = discord.ui.TextInput(label=questions[3], max_length=1000)
+        self.q5 = discord.ui.TextInput(label=questions[4], max_length=1000)
         for item in (self.q1, self.q2, self.q3, self.q4, self.q5):
             self.add_item(item)
 
     async def on_submit(self, interaction: discord.Interaction):
-        partial_answers[self.member.id] = [
-            self.q1.value,
-            self.q2.value,
-            self.q3.value,
-            self.q4.value,
-            self.q5.value,
-        ]
+        import time
+        partial_answers[self.member.id] = {
+            'answers': [
+                self.q1.value,
+                self.q2.value,
+                self.q3.value,
+                self.q4.value,
+                self.q5.value,
+            ],
+            'timestamp': time.time()
+        }
         await interaction.response.send_modal(ApplicationModalPart2(self.member))
 
 
@@ -59,16 +80,27 @@ class ApplicationModalPart2(discord.ui.Modal):
     def __init__(self, member: discord.Member):
         super().__init__(title="Guild Application (2/2)")
         self.member = member
-        self.q6 = discord.ui.TextInput(label=questions[5])
-        self.q7 = discord.ui.TextInput(label=questions[6])
+        self.q6 = discord.ui.TextInput(label=questions[5], style=discord.TextStyle.paragraph, max_length=2000)
+        self.q7 = discord.ui.TextInput(label=questions[6], style=discord.TextStyle.paragraph, max_length=1000)
         self.add_item(self.q6)
         self.add_item(self.q7)
 
     async def on_submit(self, interaction: discord.Interaction):
-        answers = partial_answers.pop(self.member.id, [])
+        # Clean up old entries before processing
+        cleanup_partial_answers()
+        
+        partial_data = partial_answers.pop(self.member.id, {})
+        answers = partial_data.get('answers', [])
         answers.extend([self.q6.value, self.q7.value])
 
         guild = interaction.guild
+        if INTERVIEW_CATEGORY_ID is None:
+            await interaction.response.send_message(
+                "Interview category not configured. Please contact an officer.",
+                ephemeral=True,
+            )
+            return
+        
         category_id = int(INTERVIEW_CATEGORY_ID)
         category = guild.get_channel(category_id)
 
@@ -111,7 +143,7 @@ class ApplicationModalPart2(discord.ui.Modal):
                 ephemeral=True,
             )
         except Exception as e:
-            print(e)
+            logger.error(f"Error creating application channel for {self.member.name}: {e}")
             await interaction.response.send_message(
                 "There was an error submitting your application. Please contact an officer.",
                 ephemeral=True,
@@ -124,13 +156,44 @@ class ApplicationView(discord.ui.View):
 
     @discord.ui.button(label="Apply", style=discord.ButtonStyle.primary, custom_id="apply_button")
     async def apply(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Check if user already has a pending application
+        if interaction.user.id in partial_answers:
+            await interaction.response.send_message(
+                "You already have a pending application. Please complete it before starting a new one.",
+                ephemeral=True
+            )
+            return
+        
+        # Check if user already has an application channel
+        guild = interaction.guild
+        if guild:
+            channel_name = f"application-{interaction.user.name.lower()}"
+            existing_channel = discord.utils.get(guild.channels, name=channel_name)
+            if existing_channel:
+                await interaction.response.send_message(
+                    f"You already have an application channel: {existing_channel.mention}",
+                    ephemeral=True
+                )
+                return
+        
         await interaction.response.send_modal(ApplicationModalPart1(interaction.user))
 
 
 @bot.event
 async def on_ready():
-    print(f'Logged in as {bot.user.name}')
+    logger.info(f'Bot logged in as {bot.user.name} (ID: {bot.user.id})')
     bot.add_view(ApplicationView())
+    
+    # Start periodic cleanup task
+    bot.loop.create_task(periodic_cleanup())
+    logger.info('Application bot is ready and listening for applications')
+
+async def periodic_cleanup():
+    """Periodically clean up old partial answers"""
+    import asyncio
+    while True:
+        await asyncio.sleep(3600)  # Run every hour
+        cleanup_partial_answers()
 
 @bot.command()
 @commands.has_permissions(administrator=True)

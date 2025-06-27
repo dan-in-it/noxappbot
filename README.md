@@ -1,133 +1,125 @@
-# noxappbot
-Nox Guild Application Bot
+# NoxAppBot - Discord Guild Application Bot
 
-NoxAppBot is a Discord bot designed to streamline the guild application process for World of Warcraft guilds. Applicants start by clicking a button and filling out an in-server form. Their responses are then posted in a private channel for review by the applicant and guild officers.
+A Discord bot designed to streamline the guild application process for World of Warcraft guilds. Applicants fill out forms through Discord modals, and their responses are posted in private channels for review.
 
-## Features
+## ✨ Features
 
--   **Button-Initiated Applications:** A simple "Apply" button to start the application process.
--   **Form-Based Questionnaire:** Applicants answer the questions through Discord modals, so no direct messages or privileged intents are required.
--   **Private Application Channels:** Each application automatically generates a new, private text channel.
--   **Secure Review Process:** The application channel is only accessible to the applicant and designated roles (e.g., officers), ensuring privacy.
--   **Easy Configuration:** Bot settings, such as the token and channel category, are managed through environment variables in a `.env` file.
--   **Administrator Command:** A command for server administrators to post the initial application message.
+- **🔘 Button-Initiated Applications:** Simple "Apply" button to start the process
+- **📝 Two-Part Modal Forms:** Handles Discord's 5-field limit with seamless multi-part forms
+- **🔒 Private Application Channels:** Automatically creates secure, private channels for each application
+- **👥 Role-Based Access:** Configurable access for officers and administrators
+- **🚫 No Privileged Intents:** Works with default Discord permissions
+- **🛡️ Duplicate Prevention:** Prevents users from submitting multiple applications
+- **📊 Comprehensive Logging:** Built-in error handling and logging
+- **⚙️ Easy Configuration:** Environment-based configuration with validation
 
-## Prerequisites
+## 📋 Prerequisites
 
--   Python 3.8 or higher
--   A Discord account and a Discord server where you have administrative permissions.
--   `pip` for installing Python packages.
+- **Python 3.8+** installed on your system
+- **Discord account** with a server where you have administrative permissions
+- **Basic command line knowledge** for setup and running
 
-## Setup Instructions
+## 🚀 Quick Start
 
-Follow these steps to get your application bot up and running.
-
-### 1. Clone the Repository
-
-First, clone this repository to your local machine:
+### 1. Clone and Setup
 
 ```bash
 git clone https://github.com/dan-in-it/noxappbot.git
 cd noxappbot
-```
-
-### 2. Install Dependencies
-
-Install the required Python libraries using the `requirements.txt` file:
-
-```bash
 pip install -r requirements.txt
 ```
 
-### 3. Create a Discord Bot
+### 2. Create Discord Application
 
-1.  Go to the [Discord Developer Portal](https://discord.com/developers/applications).
-2.  Click on **"New Application"** and give your bot a name (e.g., "Nox Guild Applications").
-3.  Navigate to the **"Bot"** tab on the left-hand menu.
-4.  Click **"Reset Token"** to generate a new bot token. **Copy this token immediately and save it somewhere safe.** This is your bot's password.
+1. Visit the [Discord Developer Portal](https://discord.com/developers/applications)
+2. Click **"New Application"** and name it (e.g., "Guild Application Bot")
+3. Go to the **"Bot"** tab
+4. Click **"Reset Token"** and **copy the token immediately**
+5. **Important:** Keep this token secure - it's your bot's password!
 
-### 4. Configure the Bot
-
-Copy `.env.example` to `.env` and fill in the required values:
+### 3. Configure Environment
 
 ```bash
+# Copy the example environment file
 cp .env.example .env
+
+# Edit .env with your favorite text editor
+# Add your bot token and category ID
 ```
 
-Then edit `.env`:
-
+Your `.env` file should look like:
+```env
+DISCORD_BOT_TOKEN="your_actual_bot_token_here"
+INTERVIEW_CATEGORY_ID="your_category_id_here"
 ```
-DISCORD_BOT_TOKEN="YOUR_DISCORD_BOT_TOKEN"
-INTERVIEW_CATEGORY_ID="YOUR_INTERVIEW_CATEGORY_ID"
+
+**Getting the Category ID:**
+1. In Discord: **User Settings → Advanced → Enable Developer Mode**
+2. Right-click your desired category → **"Copy Category ID"**
+
+### 4. Invite Bot to Server
+
+1. In Discord Developer Portal: **OAuth2 → URL Generator**
+2. **Scopes:** Select `bot` and `applications.commands`
+3. **Bot Permissions:**
+   - ✅ Manage Channels
+   - ✅ Send Messages
+   - ✅ Embed Links
+   - ✅ Read Message History
+4. Copy the generated URL and authorize the bot to your server
+
+### 5. Test Configuration (Optional but Recommended)
+
+```bash
+python test_bot.py
 ```
 
-- `DISCORD_BOT_TOKEN`: Paste the bot token you copied from the Discord Developer Portal.
-- `INTERVIEW_CATEGORY_ID`: This is the ID of the category in your Discord server where the private application channels will be created.
+This validates your setup before running the bot.
 
-**How to get the Category ID:**
-
-1.  In Discord, go to **User Settings > Advanced**.
-2.  Enable **Developer Mode**.
-3.  Right-click on the category in your server where you want the application channels to be created and select **"Copy Category ID"**.
-
-### 5. Invite the Bot to Your Server
-
-1.  In the Discord Developer Portal, go to the **"OAuth2"** tab and then **"URL Generator"**.
-2.  Select the following scopes:
-    -   `bot`
-    -   `applications.commands`
-3.  Select the following Bot Permissions:
-    -   **Manage Channels** (to create the private application channels)
-    -   **Send Messages**
-    -   **Embed Links**
-    -   **Read Message History**
-4.  Copy the generated URL and paste it into your web browser.
-5.  Select the server you want to add the bot to and click **"Authorize"**.
-
-## Usage
-
-### 1. Run the Bot
-
-To start the bot, run the `bot.py` file from the root directory of the project:
+### 6. Start the Bot
 
 ```bash
 python src/bot.py
 ```
 
-If everything is configured correctly, you will see a message in your console:
-
+You should see:
 ```
-Logged in as YourBotName
-```
-
-### 2. Post the Application Button
-
-In your Discord server, go to the channel where you want the "Apply" button to be posted. Use the following command:
-
-```
-!post_application
+INFO:__main__:Bot logged in as YourBotName (ID: 123456789)
+INFO:__main__:Application bot is ready and listening for applications
 ```
 
-Only users with administrator permissions can use this command. The bot will post an embedded message with an "Apply" button.
+## 📖 Usage Guide
 
-### 3. The Application Process
+### Setting Up Applications
 
-1.  A user clicks the "Apply" button.
-2.  A modal window appears with the application questions.
-3.  After submitting the form, a second modal collects the remaining questions.
-4.  Once submitted, the bot creates a new private channel named `application-{username}` under the configured category.
-5.  The bot posts the completed application in the new channel.
-6.  The applicant receives a confirmation message with a link to their private application channel.
+1. **Post the Application Button** (Administrator only):
+   ```
+   !post_application
+   ```
+   Run this command in the channel where you want the application button.
 
-## Customization
+2. **Application Flow:**
+   - User clicks "Apply" button
+   - Fills out Part 1 of the application (5 questions)
+   - Automatically proceeds to Part 2 (2 questions)
+   - Bot creates private channel: `application-{username}`
+   - Application is posted as an embed in the new channel
+   - User gets confirmation with channel link
 
-### Changing the Questions
+### Managing Applications
 
-You can customize the application questions by editing the `questions` list in `src/bot.py`:
+- **Private Channels:** Each application gets its own private channel
+- **Access Control:** Only the applicant and configured roles can see the channel
+- **Review Process:** Officers can discuss applications privately in these channels
+- **Cleanup:** Channels can be manually deleted after processing applications
+
+## ⚙️ Customization
+
+### Modifying Questions
+
+Edit the `questions` list in [`src/bot.py`](src/bot.py:21-29):
 
 ```python
-# src/bot.py
-
 questions = [
     "Which raid team are you applying to? Weekday (Tues/Wed/Thurs), Weekend (Fri/Sat/Sun), Floater/Casual",
     "Have you reviewed the raid schedule for the team you're applying for?",
@@ -139,24 +131,95 @@ questions = [
 ]
 ```
 
-### Adding Officer Roles
+**Important:** Keep exactly 7 questions (5 in part 1, 2 in part 2) to maintain the modal structure.
 
-If you want to give specific roles (e.g., "Officers") access to the private application channels, you can add them to the `overwrites` dictionary in the `apply` function within `src/bot.py`.
+### Adding Officer Role Access
 
-1.  You will need the Role ID for your officer role (enable Developer Mode and right-click the role to copy the ID).
-2.  Uncomment and edit the following line in `src/bot.py`:
+To give specific roles access to application channels, modify the `overwrites` in [`src/bot.py`](src/bot.py:95-100):
 
 ```python
-# src/bot.py
+# Get your officer role ID (right-click role → Copy ID with Developer Mode enabled)
+OFFICER_ROLE_ID = 123456789012345678  # Replace with actual ID
 
-# ... inside the apply function
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            # Add your officer role ID here
-            guild.get_role(123456789012345678): discord.PermissionOverwrite(read_messages=True)
-        }
-# ...
+# In the overwrites dictionary:
+overwrites = {
+    guild.default_role: discord.PermissionOverwrite(read_messages=False),
+    self.member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+    guild.get_role(OFFICER_ROLE_ID): discord.PermissionOverwrite(read_messages=True, send_messages=True),
+}
 ```
 
-Replace `123456789012345678` with your actual officer role ID.
+### Adjusting Text Limits
+
+Modify character limits in the modal classes:
+- **Short answers:** `max_length=1000`
+- **Long answers:** `max_length=2000` with `style=discord.TextStyle.paragraph`
+
+## 🔧 Troubleshooting
+
+### Common Issues
+
+**"Import discord could not be resolved"**
+```bash
+pip install discord.py python-dotenv
+```
+
+**"Bot not responding to commands"**
+- Verify bot has proper permissions in your server
+- Check that the bot is online (green status)
+- Ensure you're using `!post_application` with administrator permissions
+
+**"Interview category not found"**
+- Verify the category ID in your `.env` file
+- Ensure the bot has access to the category
+- Check that the category still exists
+
+**"Permission denied when creating channels"**
+- Bot needs "Manage Channels" permission
+- Verify bot role is above the category in role hierarchy
+
+### Validation Script
+
+Run the test script to diagnose issues:
+```bash
+python test_bot.py
+```
+
+This checks:
+- ✅ File structure
+- ✅ Dependencies installed
+- ✅ Environment variables configured
+- ✅ Bot configuration validity
+
+## 🛡️ Security Features
+
+- **No Privileged Intents:** Uses only default Discord permissions
+- **Environment Variables:** Sensitive data stored securely
+- **Input Validation:** Prevents malformed data
+- **Memory Management:** Automatic cleanup of temporary data
+- **Error Handling:** Comprehensive logging without exposing sensitive information
+- **Duplicate Prevention:** Users can't submit multiple applications simultaneously
+
+## 📝 Technical Details
+
+- **Language:** Python 3.8+
+- **Library:** discord.py 2.3.0+
+- **Architecture:** Event-driven with modal-based forms
+- **Storage:** In-memory with automatic cleanup (no database required)
+- **Permissions:** Standard bot permissions (no privileged intents)
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Test with `python test_bot.py`
+5. Submit a pull request
+
+## 📄 License
+
+This project is open source. See the repository for license details.
+
+---
+
+**Need Help?** Check the troubleshooting section above or create an issue in the repository.
