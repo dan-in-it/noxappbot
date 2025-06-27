@@ -128,11 +128,13 @@ You can customize the application questions by editing the `questions` list in `
 # src/bot.py
 
 questions = [
-    "What is your character's name, class, and specialization?",
-    "What is your raid experience?",
-    "What are your goals in World of Warcraft?",
-    "Why do you want to join our guild?",
-    "Add a link to your warcraftlogs page if you have one."
+    "Which raid team are you applying to? Weekday (Tues/Wed/Thurs), Weekend (Fri/Sat/Sun), Floater/Casual",
+    "Have you reviewed the raid schedule for the team you're applying for?",
+    "Is there a certain class/spec/role that you prefer to play?",
+    "Please provide a link to your Warcraft Logs page for the character(s) you're applying with",
+    "Do you currently have any friends or family in the guild? If so, who?",
+    "Tell us about yourself and your raiding experience",
+    "Any additional comments/questions?"
 ]
 ```
 
