@@ -1,5 +1,4 @@
 {
   "token": "YOUR_DISCORD_BOT_TOKEN",
-  "interview_channel_id": "YOUR_INTERVIEW_CHANNEL_ID",
-  "guild_id": "YOUR_GUILD_ID"
+  "interview_category_id": "YOUR_INTERVIEW_CATEGORY_ID"
 }
