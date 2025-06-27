@@ -9,7 +9,7 @@ NoxAppBot is a Discord bot designed to streamline the guild application process 
 -   **DM-Based Questionnaire:** The bot interacts with applicants through direct messages to ask a series of predefined questions.
 -   **Private Application Channels:** Each application automatically generates a new, private text channel.
 -   **Secure Review Process:** The application channel is only accessible to the applicant and designated roles (e.g., officers), ensuring privacy.
--   **Easy Configuration:** Bot settings, such as the token and channel category, are managed through a simple `config.json` file.
+-   **Easy Configuration:** Bot settings, such as the token and channel category, are managed through environment variables in a `.env` file.
 -   **Administrator Command:** A command for server administrators to post the initial application message.
 
 ## Prerequisites
@@ -51,17 +51,21 @@ pip install -r requirements.txt
 
 ### 4. Configure the Bot
 
-Open the `src/config.json` file and fill in the required values:
+Copy `.env.example` to `.env` and fill in the required values:
 
-```json
-{
-  "token": "YOUR_DISCORD_BOT_TOKEN",
-  "interview_category_id": "YOUR_INTERVIEW_CATEGORY_ID"
-}
+```bash
+cp .env.example .env
 ```
 
--   `token`: Paste the bot token you copied from the Discord Developer Portal.
--   `interview_category_id`: This is the ID of the category in your Discord server where the private application channels will be created.
+Then edit `.env`:
+
+```
+DISCORD_BOT_TOKEN="YOUR_DISCORD_BOT_TOKEN"
+INTERVIEW_CATEGORY_ID="YOUR_INTERVIEW_CATEGORY_ID"
+```
+
+- `DISCORD_BOT_TOKEN`: Paste the bot token you copied from the Discord Developer Portal.
+- `INTERVIEW_CATEGORY_ID`: This is the ID of the category in your Discord server where the private application channels will be created.
 
 **How to get the Category ID:**
 
