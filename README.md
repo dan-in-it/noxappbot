@@ -5,10 +5,11 @@ A Discord bot designed to streamline the guild application process for World of 
 ## ✨ Features
 
 - **🔘 Button-Initiated Applications:** Simple "Apply" button to start the process
-- **💬 DM-Based Application Process:** Interactive application via direct messages
+- **📝 Modal-Based Application Forms:** Two-part modal forms for comprehensive applications
 - **🔒 Private Application Channels:** Automatically creates secure, private channels for each application
 - **👥 Role-Based Access:** Configurable access for officers and administrators
 - **⚡ Slash Commands:** Modern Discord slash command interface
+- **🚫 No Privileged Intents:** Works with default Discord permissions only
 - **🛡️ Duplicate Prevention:** Prevents users from submitting multiple applications
 - **📊 Comprehensive Logging:** Built-in error handling and logging
 - **⚙️ Easy Configuration:** Environment-based configuration with validation
@@ -122,16 +123,11 @@ INFO:__main__:Application bot is ready and listening for applications
 
 2. **Application Flow:**
    - User clicks "Apply to Guild" button
-   - Bot sends a DM with the first question
-   - User responds to each question in DM
-   - After all 7 questions are answered, bot creates private channel: `application-{username}`
+   - First modal appears with 5 questions
+   - After submitting, second modal appears with 2 remaining questions
+   - Bot creates private channel: `application-{username}`
    - Application is posted as an embed in the new channel
    - User gets confirmation with channel link
-
-3. **DM Requirements:**
-   - Users must have DMs enabled from server members
-   - Bot will notify users if DMs are disabled
-   - Users can type 'cancel' at any time to stop the application
 
 ### Managing Applications
 
@@ -158,7 +154,7 @@ questions = [
 ]
 ```
 
-**Important:** You can modify the number and content of questions as needed. The bot will ask them sequentially via DM.
+**Important:** Keep exactly 7 questions (5 in first modal, 2 in second modal) to maintain the modal structure. Discord limits modals to 5 components each.
 
 ### Adding Officer/Admin Role Access
 
@@ -206,15 +202,10 @@ pip install discord.py python-dotenv
 - Bot needs "Manage Channels" permission
 - Verify bot role is above the category in role hierarchy
 
-**"Can't receive DMs from the bot"**
-- Enable "Allow direct messages from server members" in Privacy Settings
-- Check if you have blocked the bot
-- Ensure the bot has permission to send DMs
-
-**"Application stuck in DMs"**
-- Type 'cancel' to stop the current application
-- Start a new application from the server
-- Contact an administrator if issues persist
+**"Modal not appearing when clicking Apply"**
+- Make sure you don't have an existing application channel
+- Try refreshing Discord and clicking the button again
+- Contact an administrator if the issue persists
 
 ### Validation Script
 
@@ -231,13 +222,13 @@ This checks:
 
 ## 🛡️ Security Features
 
-- **Message Content Intent:** Only uses message content for DM-based applications
+- **No Privileged Intents:** Uses only default Discord permissions
 - **Environment Variables:** Sensitive data stored securely
 - **Input Validation:** Prevents malformed data
-- **Memory Management:** Automatic cleanup of temporary data
 - **Error Handling:** Comprehensive logging without exposing sensitive information
 - **Duplicate Prevention:** Users can't submit multiple applications simultaneously
-- **DM Privacy:** Applications are handled privately via direct messages
+- **Private Channels:** Applications are handled in secure, private channels
+- **Role-Based Access:** Configurable access control for staff roles
 
 ## 📝 Technical Details
 
