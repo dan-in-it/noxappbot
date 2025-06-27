@@ -23,6 +23,7 @@ def test_environment_variables():
         from dotenv import load_dotenv
         load_dotenv()
         
+        # Required variables
         token = os.getenv("DISCORD_BOT_TOKEN")
         category_id = os.getenv("INTERVIEW_CATEGORY_ID")
         
@@ -40,6 +41,33 @@ def test_environment_variables():
         except ValueError:
             print("❌ INTERVIEW_CATEGORY_ID must be a valid Discord channel ID (numeric)")
             return False
+        
+        # Optional variables validation
+        officer_role_id = os.getenv("OFFICER_ROLE_ID")
+        admin_role_id = os.getenv("ADMIN_ROLE_ID")
+        
+        if officer_role_id and officer_role_id.strip():
+            try:
+                int(officer_role_id)
+                print("✅ OFFICER_ROLE_ID configured and valid")
+            except ValueError:
+                print("⚠️  OFFICER_ROLE_ID is set but not numeric - will be ignored")
+        
+        if admin_role_id and admin_role_id.strip():
+            try:
+                int(admin_role_id)
+                print("✅ ADMIN_ROLE_ID configured and valid")
+            except ValueError:
+                print("⚠️  ADMIN_ROLE_ID is set but not numeric - will be ignored")
+        
+        # Configuration variables
+        prefix = os.getenv("BOT_COMMAND_PREFIX", "!")
+        channel_prefix = os.getenv("APPLICATION_CHANNEL_PREFIX", "application")
+        log_level = os.getenv("LOG_LEVEL", "INFO")
+        
+        print(f"✅ Bot command prefix: {prefix}")
+        print(f"✅ Application channel prefix: {channel_prefix}")
+        print(f"✅ Log level: {log_level}")
         
         print("✅ Environment variables configured correctly")
         return True

@@ -10,18 +10,29 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+# Required environment variables
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 INTERVIEW_CATEGORY_ID = os.getenv("INTERVIEW_CATEGORY_ID")
 
+# Optional environment variables with defaults
+OFFICER_ROLE_ID = os.getenv("OFFICER_ROLE_ID")
+ADMIN_ROLE_ID = os.getenv("ADMIN_ROLE_ID")
+BOT_COMMAND_PREFIX = os.getenv("BOT_COMMAND_PREFIX", "!")
+APPLICATION_CHANNEL_PREFIX = os.getenv("APPLICATION_CHANNEL_PREFIX", "application")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# Validate required environment variables
 if TOKEN is None or INTERVIEW_CATEGORY_ID is None:
     raise RuntimeError(
         "DISCORD_BOT_TOKEN and INTERVIEW_CATEGORY_ID must be set in the .env file"
     )
 
+# Configure logging level
+logging.getLogger().setLevel(getattr(logging, LOG_LEVEL.upper(), logging.INFO))
+
 intents = discord.Intents.default()
 
-
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix=BOT_COMMAND_PREFIX, intents=intents)
 
 questions = [
     "Which raid team are you applying to? Weekday (Tues/Wed/Thurs), Weekend (Fri/Sat/Sun), Floater/Casual",
@@ -111,13 +122,35 @@ class ApplicationModalPart2(discord.ui.Modal):
             )
             return
 
-        channel_name = f"application-{self.member.name.lower()}"
+        channel_name = f"{APPLICATION_CHANNEL_PREFIX}-{self.member.name.lower()}"
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             self.member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            # You can add officer roles here, e.g.:
-            # guild.get_role(YOUR_OFFICER_ROLE_ID): discord.PermissionOverwrite(read_messages=True),
         }
+        
+        # Add officer role access if configured
+        if OFFICER_ROLE_ID:
+            try:
+                officer_role = guild.get_role(int(OFFICER_ROLE_ID))
+                if officer_role:
+                    overwrites[officer_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                    logger.info(f"Added officer role {officer_role.name} to application channel permissions")
+                else:
+                    logger.warning(f"Officer role with ID {OFFICER_ROLE_ID} not found in guild")
+            except ValueError:
+                logger.error(f"Invalid OFFICER_ROLE_ID: {OFFICER_ROLE_ID} (must be numeric)")
+        
+        # Add admin role access if configured
+        if ADMIN_ROLE_ID:
+            try:
+                admin_role = guild.get_role(int(ADMIN_ROLE_ID))
+                if admin_role:
+                    overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                    logger.info(f"Added admin role {admin_role.name} to application channel permissions")
+                else:
+                    logger.warning(f"Admin role with ID {ADMIN_ROLE_ID} not found in guild")
+            except ValueError:
+                logger.error(f"Invalid ADMIN_ROLE_ID: {ADMIN_ROLE_ID} (must be numeric)")
 
         try:
             interview_channel = await guild.create_text_channel(
@@ -167,7 +200,7 @@ class ApplicationView(discord.ui.View):
         # Check if user already has an application channel
         guild = interaction.guild
         if guild:
-            channel_name = f"application-{interaction.user.name.lower()}"
+            channel_name = f"{APPLICATION_CHANNEL_PREFIX}-{interaction.user.name.lower()}"
             existing_channel = discord.utils.get(guild.channels, name=channel_name)
             if existing_channel:
                 await interaction.response.send_message(

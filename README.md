@@ -49,13 +49,37 @@ cp .env.example .env
 
 Your `.env` file should look like:
 ```env
+# Required Configuration
 DISCORD_BOT_TOKEN="your_actual_bot_token_here"
 INTERVIEW_CATEGORY_ID="your_category_id_here"
+
+# Optional Role Configuration
+OFFICER_ROLE_ID="123456789012345678"
+ADMIN_ROLE_ID="987654321098765432"
+
+# Optional Bot Configuration
+BOT_COMMAND_PREFIX="!"
+APPLICATION_CHANNEL_PREFIX="application"
+LOG_LEVEL="INFO"
 ```
+
+### **Required Configuration**
 
 **Getting the Category ID:**
 1. In Discord: **User Settings → Advanced → Enable Developer Mode**
 2. Right-click your desired category → **"Copy Category ID"**
+
+### **Optional Configuration**
+
+**Role IDs (for automatic access to application channels):**
+1. **Officer Role ID:** Right-click your officer role → **"Copy Role ID"**
+2. **Admin Role ID:** Right-click your admin role → **"Copy Role ID"**
+3. Leave empty (`""`) if you don't want automatic role access
+
+**Bot Settings:**
+- **BOT_COMMAND_PREFIX:** Command prefix (default: `!`)
+- **APPLICATION_CHANNEL_PREFIX:** Channel name prefix (default: `application`)
+- **LOG_LEVEL:** Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`)
 
 ### 4. Invite Bot to Server
 
@@ -133,7 +157,7 @@ questions = [
 
 **Important:** Keep exactly 7 questions (5 in part 1, 2 in part 2) to maintain the modal structure.
 
-### Adding Officer Role Access
+### Adding Officer/Admin Role Access
 
 To give specific roles access to application channels, modify the `overwrites` in [`src/bot.py`](src/bot.py:95-100):
 
