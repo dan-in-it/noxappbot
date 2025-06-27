@@ -1,12 +1,12 @@
 # noxappbot
 Nox Guild Application Bot
 
-NoxAppBot is a Discord bot designed to streamline the guild application process for World of Warcraft guilds. It allows potential applicants to start an application by clicking a button, answer a series of questions via direct messages, and then have their application posted in a private channel for review by the applicant and guild officers.
+NoxAppBot is a Discord bot designed to streamline the guild application process for World of Warcraft guilds. Applicants start by clicking a button and filling out an in-server form. Their responses are then posted in a private channel for review by the applicant and guild officers.
 
 ## Features
 
 -   **Button-Initiated Applications:** A simple "Apply" button to start the application process.
--   **DM-Based Questionnaire:** The bot interacts with applicants through direct messages to ask a series of predefined questions.
+-   **Form-Based Questionnaire:** Applicants answer the questions through Discord modals, so no direct messages or privileged intents are required.
 -   **Private Application Channels:** Each application automatically generates a new, private text channel.
 -   **Secure Review Process:** The application channel is only accessible to the applicant and designated roles (e.g., officers), ensuring privacy.
 -   **Easy Configuration:** Bot settings, such as the token and channel category, are managed through environment variables in a `.env` file.
@@ -44,10 +44,7 @@ pip install -r requirements.txt
 1.  Go to the [Discord Developer Portal](https://discord.com/developers/applications).
 2.  Click on **"New Application"** and give your bot a name (e.g., "Nox Guild Applications").
 3.  Navigate to the **"Bot"** tab on the left-hand menu.
-4.  Under the "Privileged Gateway Intents" section, enable the following intents:
-    -   **SERVER MEMBERS INTENT**
-    -   **MESSAGE CONTENT INTENT**
-5.  Click **"Reset Token"** to generate a new bot token. **Copy this token immediately and save it somewhere safe.** This is your bot's password.
+4.  Click **"Reset Token"** to generate a new bot token. **Copy this token immediately and save it somewhere safe.** This is your bot's password.
 
 ### 4. Configure the Bot
 
@@ -116,9 +113,9 @@ Only users with administrator permissions can use this command. The bot will pos
 ### 3. The Application Process
 
 1.  A user clicks the "Apply" button.
-2.  The bot sends the user a direct message to begin the application process.
-3.  The user answers a series of questions one by one in the DM.
-4.  Once all questions are answered, the bot creates a new private channel named `application-{username}` under the configured category.
+2.  A modal window appears with the application questions.
+3.  After submitting the form, a second modal collects the remaining questions.
+4.  Once submitted, the bot creates a new private channel named `application-{username}` under the configured category.
 5.  The bot posts the completed application in the new channel.
 6.  The applicant receives a confirmation message with a link to their private application channel.
 

@@ -14,10 +14,6 @@ if TOKEN is None or INTERVIEW_CATEGORY_ID is None:
     )
 
 intents = discord.Intents.default()
-intents.messages = True
-intents.guilds = True
-intents.members = True
-intents.message_content = True
 
 
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -29,8 +25,98 @@ questions = [
     "Please provide a link to your Warcraft Logs page for the character(s) you're applying with",
     "Do you currently have any friends or family in the guild? If so, who?",
     "Tell us about yourself and your raiding experience",
-    "Any additional comments/questions?"
+    "Any additional comments/questions?",
 ]
+
+# Temporary storage for answers between modal submissions
+partial_answers = {}
+
+
+class ApplicationModalPart1(discord.ui.Modal):
+    def __init__(self, member: discord.Member):
+        super().__init__(title="Guild Application (1/2)")
+        self.member = member
+        self.q1 = discord.ui.TextInput(label=questions[0])
+        self.q2 = discord.ui.TextInput(label=questions[1])
+        self.q3 = discord.ui.TextInput(label=questions[2])
+        self.q4 = discord.ui.TextInput(label=questions[3])
+        self.q5 = discord.ui.TextInput(label=questions[4])
+        for item in (self.q1, self.q2, self.q3, self.q4, self.q5):
+            self.add_item(item)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        partial_answers[self.member.id] = [
+            self.q1.value,
+            self.q2.value,
+            self.q3.value,
+            self.q4.value,
+            self.q5.value,
+        ]
+        await interaction.response.send_modal(ApplicationModalPart2(self.member))
+
+
+class ApplicationModalPart2(discord.ui.Modal):
+    def __init__(self, member: discord.Member):
+        super().__init__(title="Guild Application (2/2)")
+        self.member = member
+        self.q6 = discord.ui.TextInput(label=questions[5])
+        self.q7 = discord.ui.TextInput(label=questions[6])
+        self.add_item(self.q6)
+        self.add_item(self.q7)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        answers = partial_answers.pop(self.member.id, [])
+        answers.extend([self.q6.value, self.q7.value])
+
+        guild = interaction.guild
+        category_id = int(INTERVIEW_CATEGORY_ID)
+        category = guild.get_channel(category_id)
+
+        if not category or not isinstance(category, discord.CategoryChannel):
+            await interaction.response.send_message(
+                "Interview category not found. Please contact an officer.",
+                ephemeral=True,
+            )
+            return
+
+        channel_name = f"application-{self.member.name.lower()}"
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            self.member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            # You can add officer roles here, e.g.:
+            # guild.get_role(YOUR_OFFICER_ROLE_ID): discord.PermissionOverwrite(read_messages=True),
+        }
+
+        try:
+            interview_channel = await guild.create_text_channel(
+                name=channel_name,
+                category=category,
+                overwrites=overwrites,
+            )
+            embed = discord.Embed(
+                title=f"New Application from {self.member.name}",
+                color=discord.Color.blue(),
+            )
+            for i, question in enumerate(questions):
+                embed.add_field(name=question, value=answers[i], inline=False)
+
+            await interview_channel.send(embed=embed)
+            await interaction.response.send_message(
+                f"Your application channel has been created: {interview_channel.mention}. We will review it shortly.",
+                ephemeral=True,
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "I do not have permissions to create a channel. Please contact an officer.",
+                ephemeral=True,
+            )
+        except Exception as e:
+            print(e)
+            await interaction.response.send_message(
+                "There was an error submitting your application. Please contact an officer.",
+                ephemeral=True,
+            )
+
 
 class ApplicationView(discord.ui.View):
     def __init__(self):
@@ -38,58 +124,7 @@ class ApplicationView(discord.ui.View):
 
     @discord.ui.button(label="Apply", style=discord.ButtonStyle.primary, custom_id="apply_button")
     async def apply(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("I have sent you a DM with the application questions.", ephemeral=True)
-        
-        member = interaction.user
-        dm_channel = await member.create_dm()
-        
-        answers = []
-        for question in questions:
-            await dm_channel.send(question)
-            
-            def check(m):
-                return m.author == member and m.channel == dm_channel
-
-            try:
-                answer = await bot.wait_for('message', timeout=300.0, check=check)
-                answers.append(answer.content)
-            except TimeoutError:
-                await dm_channel.send("You took too long to answer. Please start the application process again.")
-                return
-
-        guild = interaction.guild
-        category_id = int(INTERVIEW_CATEGORY_ID)
-        category = guild.get_channel(category_id)
-
-        if not category or not isinstance(category, discord.CategoryChannel):
-            await dm_channel.send("Interview category not found. Please contact an officer.")
-            return
-
-        channel_name = f"application-{member.name.lower()}"
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            # You can add officer roles here, e.g.:
-            # guild.get_role(YOUR_OFFICER_ROLE_ID): discord.PermissionOverwrite(read_messages=True)
-        }
-
-        try:
-            interview_channel = await guild.create_text_channel(
-                name=channel_name,
-                category=category,
-                overwrites=overwrites
-            )
-            embed = discord.Embed(title=f"New Application from {member.name}", color=discord.Color.blue())
-            for i, question in enumerate(questions):
-                embed.add_field(name=question, value=answers[i], inline=False)
-            
-            await interview_channel.send(embed=embed)
-            await dm_channel.send(f"Your application channel has been created: {interview_channel.mention}. We will review it shortly.")
-        except discord.Forbidden:
-            await dm_channel.send("I do not have permissions to create a channel. Please contact an officer.")
-        except Exception as e:
-            print(e)
-            await dm_channel.send("There was an error submitting your application. Please contact an officer.")
+        await interaction.response.send_modal(ApplicationModalPart1(interaction.user))
 
 
 @bot.event
