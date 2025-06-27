@@ -5,10 +5,10 @@ A Discord bot designed to streamline the guild application process for World of 
 ## ✨ Features
 
 - **🔘 Button-Initiated Applications:** Simple "Apply" button to start the process
-- **📝 Two-Part Modal Forms:** Handles Discord's 5-field limit with seamless multi-part forms
+- **💬 DM-Based Application Process:** Interactive application via direct messages
 - **🔒 Private Application Channels:** Automatically creates secure, private channels for each application
 - **👥 Role-Based Access:** Configurable access for officers and administrators
-- **🚫 No Privileged Intents:** Works with default Discord permissions
+- **⚡ Slash Commands:** Modern Discord slash command interface
 - **🛡️ Duplicate Prevention:** Prevents users from submitting multiple applications
 - **📊 Comprehensive Logging:** Built-in error handling and logging
 - **⚙️ Easy Configuration:** Environment-based configuration with validation
@@ -58,7 +58,6 @@ OFFICER_ROLE_ID="123456789012345678"
 ADMIN_ROLE_ID="987654321098765432"
 
 # Optional Bot Configuration
-BOT_COMMAND_PREFIX="!"
 APPLICATION_CHANNEL_PREFIX="application"
 LOG_LEVEL="INFO"
 ```
@@ -77,7 +76,6 @@ LOG_LEVEL="INFO"
 3. Leave empty (`""`) if you don't want automatic role access
 
 **Bot Settings:**
-- **BOT_COMMAND_PREFIX:** Command prefix (default: `!`)
 - **APPLICATION_CHANNEL_PREFIX:** Channel name prefix (default: `application`)
 - **LOG_LEVEL:** Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`)
 
@@ -118,17 +116,22 @@ INFO:__main__:Application bot is ready and listening for applications
 
 1. **Post the Application Button** (Administrator only):
    ```
-   !post_application
+   /post_application
    ```
-   Run this command in the channel where you want the application button.
+   Use this slash command in the channel where you want the application button.
 
 2. **Application Flow:**
-   - User clicks "Apply" button
-   - Fills out Part 1 of the application (5 questions)
-   - Automatically proceeds to Part 2 (2 questions)
-   - Bot creates private channel: `application-{username}`
+   - User clicks "Apply to Guild" button
+   - Bot sends a DM with the first question
+   - User responds to each question in DM
+   - After all 7 questions are answered, bot creates private channel: `application-{username}`
    - Application is posted as an embed in the new channel
    - User gets confirmation with channel link
+
+3. **DM Requirements:**
+   - Users must have DMs enabled from server members
+   - Bot will notify users if DMs are disabled
+   - Users can type 'cancel' at any time to stop the application
 
 ### Managing Applications
 
@@ -155,7 +158,7 @@ questions = [
 ]
 ```
 
-**Important:** Keep exactly 7 questions (5 in part 1, 2 in part 2) to maintain the modal structure.
+**Important:** You can modify the number and content of questions as needed. The bot will ask them sequentially via DM.
 
 ### Adding Officer/Admin Role Access
 
@@ -191,7 +194,8 @@ pip install discord.py python-dotenv
 **"Bot not responding to commands"**
 - Verify bot has proper permissions in your server
 - Check that the bot is online (green status)
-- Ensure you're using `!post_application` with administrator permissions
+- Ensure you're using `/post_application` with administrator permissions
+- Make sure slash commands are synced (happens automatically on bot startup)
 
 **"Interview category not found"**
 - Verify the category ID in your `.env` file
@@ -201,6 +205,16 @@ pip install discord.py python-dotenv
 **"Permission denied when creating channels"**
 - Bot needs "Manage Channels" permission
 - Verify bot role is above the category in role hierarchy
+
+**"Can't receive DMs from the bot"**
+- Enable "Allow direct messages from server members" in Privacy Settings
+- Check if you have blocked the bot
+- Ensure the bot has permission to send DMs
+
+**"Application stuck in DMs"**
+- Type 'cancel' to stop the current application
+- Start a new application from the server
+- Contact an administrator if issues persist
 
 ### Validation Script
 
@@ -217,12 +231,13 @@ This checks:
 
 ## 🛡️ Security Features
 
-- **No Privileged Intents:** Uses only default Discord permissions
+- **Message Content Intent:** Only uses message content for DM-based applications
 - **Environment Variables:** Sensitive data stored securely
 - **Input Validation:** Prevents malformed data
 - **Memory Management:** Automatic cleanup of temporary data
 - **Error Handling:** Comprehensive logging without exposing sensitive information
 - **Duplicate Prevention:** Users can't submit multiple applications simultaneously
+- **DM Privacy:** Applications are handled privately via direct messages
 
 ## 📝 Technical Details
 

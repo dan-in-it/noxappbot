@@ -61,11 +61,9 @@ def test_environment_variables():
                 print("⚠️  ADMIN_ROLE_ID is set but not numeric - will be ignored")
         
         # Configuration variables
-        prefix = os.getenv("BOT_COMMAND_PREFIX", "!")
         channel_prefix = os.getenv("APPLICATION_CHANNEL_PREFIX", "application")
         log_level = os.getenv("LOG_LEVEL", "INFO")
         
-        print(f"✅ Bot command prefix: {prefix}")
         print(f"✅ Application channel prefix: {channel_prefix}")
         print(f"✅ Log level: {log_level}")
         
