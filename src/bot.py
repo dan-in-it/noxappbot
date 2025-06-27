@@ -1,9 +1,17 @@
 import discord
 from discord.ext import commands
-import json
+import os
+from dotenv import load_dotenv
 
-with open('src/config.json', 'r') as f:
-    config = json.load(f)
+load_dotenv()
+
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+INTERVIEW_CATEGORY_ID = os.getenv("INTERVIEW_CATEGORY_ID")
+
+if TOKEN is None or INTERVIEW_CATEGORY_ID is None:
+    raise RuntimeError(
+        "DISCORD_BOT_TOKEN and INTERVIEW_CATEGORY_ID must be set in the .env file"
+    )
 
 intents = discord.Intents.default()
 intents.messages = True
@@ -50,7 +58,7 @@ class ApplicationView(discord.ui.View):
                 return
 
         guild = interaction.guild
-        category_id = int(config["interview_category_id"])
+        category_id = int(INTERVIEW_CATEGORY_ID)
         category = guild.get_channel(category_id)
 
         if not category or not isinstance(category, discord.CategoryChannel):
@@ -99,4 +107,4 @@ async def post_application(ctx):
     )
     await ctx.send(embed=embed, view=ApplicationView())
 
-bot.run(config['token'])
+bot.run(TOKEN)
