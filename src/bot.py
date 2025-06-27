@@ -3,7 +3,7 @@ from discord.ext import commands
 import os
 import logging
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 # Set up logging
@@ -363,11 +363,11 @@ async def reject_application(
         title="❌ Application Rejected",
         description=f"**Applicant:** {applicant_name}\n**Reason:** {reason}\n**Rejected by:** {interaction.user.mention}",
         color=discord.Color.red(),
-        timestamp=datetime.utcnow()
+        timestamp=datetime.now(timezone.utc)
     )
     
     if delete_hours is not None:
-        deletion_time = datetime.utcnow() + timedelta(hours=delete_hours)
+        deletion_time = datetime.now(timezone.utc) + timedelta(hours=delete_hours)
         rejection_embed.add_field(
             name="Channel Deletion",
             value=f"This channel will be automatically deleted in {delete_hours} hours (<t:{int(deletion_time.timestamp())}:R>)",
@@ -501,7 +501,7 @@ async def approve_application(
         title="✅ Application Approved",
         description=f"**Applicant:** {applicant_name}\n**Approved by:** {interaction.user.mention}",
         color=discord.Color.green(),
-        timestamp=datetime.utcnow()
+        timestamp=datetime.now(timezone.utc)
     )
     
     acceptance_embed.add_field(
@@ -511,7 +511,7 @@ async def approve_application(
     )
     
     if delete_hours is not None:
-        deletion_time = datetime.utcnow() + timedelta(hours=delete_hours)
+        deletion_time = datetime.now(timezone.utc) + timedelta(hours=delete_hours)
         acceptance_embed.add_field(
             name="Channel Deletion",
             value=f"This channel will be automatically deleted in {delete_hours} hours (<t:{int(deletion_time.timestamp())}:R>)",
