@@ -1,18 +1,20 @@
 # NoxAppBot - Discord Guild Application Bot
 
-A Discord bot designed to streamline the guild application process for World of Warcraft guilds. Applicants fill out forms through Discord modals, and their responses are posted in private channels for review.
+A Discord bot designed to streamline the guild application process for World of Warcraft guilds. Applicants answer questions through private messages, and their responses are posted in private channels for review by officers.
 
 ## ✨ Features
 
 - **🔘 Button-Initiated Applications:** Simple "Apply" button to start the process
-- **📝 Modal-Based Application Forms:** Two-part modal forms for comprehensive applications
+- **💬 DM-Based Application Process:** Questions sent one-by-one via private messages
 - **🔒 Private Application Channels:** Automatically creates secure, private channels for each application
 - **👥 Role-Based Access:** Configurable access for officers and administrators
-- **⚡ Slash Commands:** Modern Discord slash command interface
+- **⚡ Slash Commands:** Modern Discord slash command interface with approval/rejection workflow
 - **🚫 No Privileged Intents:** Works with default Discord permissions only
 - **🛡️ Duplicate Prevention:** Prevents users from submitting multiple applications
 - **📊 Comprehensive Logging:** Built-in error handling and logging
 - **⚙️ Easy Configuration:** Environment-based configuration with validation
+- **⏰ Automatic Channel Cleanup:** Optional scheduled deletion of application channels
+- **✅ Application Management:** Built-in approve/reject commands with notifications
 
 ## 📋 Prerequisites
 
@@ -117,24 +119,40 @@ INFO:__main__:Application bot is ready and listening for applications
 
 1. **Post the Application Button** (Administrator only):
    ```
-   /post_application
+   /noxpost
    ```
    Use this slash command in the channel where you want the application button.
 
 2. **Application Flow:**
    - User clicks "Apply to Guild" button
-   - First modal appears with 5 questions
-   - After submitting, second modal appears with 2 remaining questions
+   - Bot sends first question via DM
+   - User responds in DM, bot automatically sends next question
+   - Process continues until all 7 questions are answered
    - Bot creates private channel: `application-{username}`
    - Application is posted as an embed in the new channel
    - User gets confirmation with channel link
 
 ### Managing Applications
 
+**Available Commands:**
+- `/noxapprove` - Approve an application with optional welcome message and channel cleanup
+- `/noxreject` - Reject an application with optional reason and channel cleanup
+- `/noxsync` - Force sync slash commands (Admin only)
+
+**Application Management:**
 - **Private Channels:** Each application gets its own private channel
 - **Access Control:** Only the applicant and configured roles can see the channel
 - **Review Process:** Officers can discuss applications privately in these channels
-- **Cleanup:** Channels can be manually deleted after processing applications
+- **Approval/Rejection:** Use slash commands to approve or reject with automatic notifications
+- **Automatic Cleanup:** Optionally schedule channel deletion after approval/rejection
+
+**Command Examples:**
+```
+/noxapprove welcome_message:"Welcome to our raiding team!" delete_hours:24
+/noxreject reason:"Needs more experience" delete_hours:48
+/noxapprove welcome_message:"Great to have you!"
+/noxreject reason:"Application incomplete"
+```
 
 ## ⚙️ Customization
 
@@ -154,7 +172,7 @@ questions = [
 ]
 ```
 
-**Important:** Keep exactly 7 questions (5 in first modal, 2 in second modal) to maintain the modal structure. Discord limits modals to 5 components each.
+**Important:** You can modify the number of questions as needed. The DM-based system handles any number of questions sequentially.
 
 ### Adding Officer/Admin Role Access
 
@@ -172,11 +190,9 @@ overwrites = {
 }
 ```
 
-### Adjusting Text Limits
+### Adjusting Response Handling
 
-Modify character limits in the modal classes:
-- **Short answers:** `max_length=1000`
-- **Long answers:** `max_length=2000` with `style=discord.TextStyle.paragraph`
+The DM-based system automatically handles responses of any length. Discord DM messages have a 2000 character limit, but users can send multiple messages if needed. The bot will wait for each response before proceeding to the next question.
 
 ## 🔧 Troubleshooting
 
@@ -190,8 +206,8 @@ pip install discord.py python-dotenv
 **"Bot not responding to commands"**
 - Verify bot has proper permissions in your server
 - Check that the bot is online (green status)
-- Ensure you're using `/post_application` with administrator permissions
-- Make sure slash commands are synced (happens automatically on bot startup)
+- Ensure you're using `/noxpost` with administrator permissions
+- Make sure slash commands are synced (use `/noxsync` if needed)
 
 **"Interview category not found"**
 - Verify the category ID in your `.env` file
@@ -202,9 +218,10 @@ pip install discord.py python-dotenv
 - Bot needs "Manage Channels" permission
 - Verify bot role is above the category in role hierarchy
 
-**"Modal not appearing when clicking Apply"**
-- Make sure you don't have an existing application channel
-- Try refreshing Discord and clicking the button again
+**"DM not received when clicking Apply"**
+- Check if your DMs are enabled for server members
+- Make sure you don't have an existing application in progress
+- Verify the bot can send you direct messages
 - Contact an administrator if the issue persists
 
 ### Validation Script
@@ -234,7 +251,7 @@ This checks:
 
 - **Language:** Python 3.8+
 - **Library:** discord.py 2.3.0+
-- **Architecture:** Event-driven with modal-based forms
+- **Architecture:** Event-driven with DM-based conversation flow
 - **Storage:** In-memory with automatic cleanup (no database required)
 - **Permissions:** Standard bot permissions (no privileged intents)
 
