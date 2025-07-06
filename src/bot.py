@@ -246,10 +246,16 @@ class ApplicationView(discord.ui.View):
                 ephemeral=True
             )
 
-async def schedule_channel_deletion(channel, delay_hours=24):
-    """Schedule a channel for deletion after a specified delay"""
+# Import time utilities
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from time_utils import parse_time_string, format_time_duration
+
+async def schedule_channel_deletion(channel, delay_seconds):
+    """Schedule a channel for deletion after a specified delay in seconds"""
     try:
-        await asyncio.sleep(delay_hours * 3600)  # Convert hours to seconds
+        await asyncio.sleep(delay_seconds)
         if channel:
             await channel.delete(reason="Application processed - automatic cleanup")
             logger.info(f"Deleted application channel: {channel.name}")
@@ -289,12 +295,12 @@ async def sync_commands(interaction: discord.Interaction):
 @bot.tree.command(name="noxreject", description="Reject an application")
 @discord.app_commands.describe(
     reason="Reason for rejection (optional)",
-    delete_hours="Hours until channel deletion (optional - if not specified, channel stays)"
+    delete_time="Time until channel deletion (e.g., '10m', '1h', '30m') - if not specified, channel stays"
 )
 async def reject_application(
     interaction: discord.Interaction,
     reason: str = "No reason provided",
-    delete_hours: int | None = None
+    delete_time: str | None = None
 ):
     # Ensure this is used in a guild
     if not interaction.guild:
@@ -346,11 +352,13 @@ async def reject_application(
         )
         return
     
-    # Validate delete_hours if provided
-    if delete_hours is not None:
-        if delete_hours < 1 or delete_hours > 168:  # Max 1 week
+    # Parse and validate delete_time if provided
+    delete_seconds = None
+    if delete_time is not None:
+        delete_seconds = parse_time_string(delete_time)
+        if delete_seconds is None:
             await interaction.response.send_message(
-                "❌ Delete hours must be between 1 and 168 hours (1 week).",
+                "❌ Invalid time format. Use formats like '10m' for minutes or '1h' for hours. Maximum is 1 week (168h or 10080m).",
                 ephemeral=True
             )
             return
@@ -366,11 +374,12 @@ async def reject_application(
         timestamp=datetime.now(timezone.utc)
     )
     
-    if delete_hours is not None:
-        deletion_time = datetime.now(timezone.utc) + timedelta(hours=delete_hours)
+    if delete_seconds is not None:
+        deletion_time = datetime.now(timezone.utc) + timedelta(seconds=delete_seconds)
+        time_duration = format_time_duration(delete_seconds)
         rejection_embed.add_field(
             name="Channel Deletion",
-            value=f"This channel will be automatically deleted in {delete_hours} hours (<t:{int(deletion_time.timestamp())}:R>)",
+            value=f"This channel will be automatically deleted in {time_duration} (<t:{int(deletion_time.timestamp())}:R>)",
             inline=False
         )
     else:
@@ -418,21 +427,22 @@ async def reject_application(
         logger.error(f"Error sending rejection DM: {e}")
     
     # Schedule channel deletion if requested
-    if delete_hours is not None:
-        asyncio.create_task(schedule_channel_deletion(channel, delete_hours))
-        logger.info(f"Application rejected by {interaction.user.display_name} in {channel.name}. Channel scheduled for deletion in {delete_hours} hours.")
+    if delete_seconds is not None:
+        asyncio.create_task(schedule_channel_deletion(channel, delete_seconds))
+        time_duration = format_time_duration(delete_seconds)
+        logger.info(f"Application rejected by {interaction.user.display_name} in {channel.name}. Channel scheduled for deletion in {time_duration}.")
     else:
         logger.info(f"Application rejected by {interaction.user.display_name} in {channel.name}. Channel will remain open.")
 
 @bot.tree.command(name="noxapprove", description="Approve an application")
 @discord.app_commands.describe(
     welcome_message="Custom welcome message (optional)",
-    delete_hours="Hours until channel deletion (optional - if not specified, channel stays)"
+    delete_time="Time until channel deletion (e.g., '10m', '1h', '30m') - if not specified, channel stays"
 )
 async def approve_application(
     interaction: discord.Interaction,
     welcome_message: str = "Welcome to the guild! We're excited to have you join us.",
-    delete_hours: int | None = None
+    delete_time: str | None = None
 ):
     # Ensure this is used in a guild
     if not interaction.guild:
@@ -484,11 +494,13 @@ async def approve_application(
         )
         return
     
-    # Validate delete_hours if provided
-    if delete_hours is not None:
-        if delete_hours < 1 or delete_hours > 168:  # Max 1 week
+    # Parse and validate delete_time if provided
+    delete_seconds = None
+    if delete_time is not None:
+        delete_seconds = parse_time_string(delete_time)
+        if delete_seconds is None:
             await interaction.response.send_message(
-                "❌ Delete hours must be between 1 and 168 hours (1 week).",
+                "❌ Invalid time format. Use formats like '10m' for minutes or '1h' for hours. Maximum is 1 week (168h or 10080m).",
                 ephemeral=True
             )
             return
@@ -510,11 +522,12 @@ async def approve_application(
         inline=False
     )
     
-    if delete_hours is not None:
-        deletion_time = datetime.now(timezone.utc) + timedelta(hours=delete_hours)
+    if delete_seconds is not None:
+        deletion_time = datetime.now(timezone.utc) + timedelta(seconds=delete_seconds)
+        time_duration = format_time_duration(delete_seconds)
         acceptance_embed.add_field(
             name="Channel Deletion",
-            value=f"This channel will be automatically deleted in {delete_hours} hours (<t:{int(deletion_time.timestamp())}:R>)",
+            value=f"This channel will be automatically deleted in {time_duration} (<t:{int(deletion_time.timestamp())}:R>)",
             inline=False
         )
     else:
@@ -562,9 +575,10 @@ async def approve_application(
         logger.error(f"Error sending approval DM: {e}")
     
     # Schedule channel deletion if requested
-    if delete_hours is not None:
-        asyncio.create_task(schedule_channel_deletion(channel, delete_hours))
-        logger.info(f"Application approved by {interaction.user.display_name} in {channel.name}. Channel scheduled for deletion in {delete_hours} hours.")
+    if delete_seconds is not None:
+        asyncio.create_task(schedule_channel_deletion(channel, delete_seconds))
+        time_duration = format_time_duration(delete_seconds)
+        logger.info(f"Application approved by {interaction.user.display_name} in {channel.name}. Channel scheduled for deletion in {time_duration}.")
     else:
         logger.info(f"Application approved by {interaction.user.display_name} in {channel.name}. Channel will remain open.")
 

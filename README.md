@@ -135,8 +135,8 @@ INFO:__main__:Application bot is ready and listening for applications
 ### Managing Applications
 
 **Available Commands:**
-- `/noxapprove` - Approve an application with optional welcome message and channel cleanup
-- `/noxreject` - Reject an application with optional reason and channel cleanup
+- `/noxapprove` - Approve an application with optional welcome message and flexible channel cleanup timing
+- `/noxreject` - Reject an application with optional reason and flexible channel cleanup timing
 - `/noxsync` - Force sync slash commands (Admin only)
 
 **Application Management:**
@@ -148,11 +148,27 @@ INFO:__main__:Application bot is ready and listening for applications
 
 **Command Examples:**
 ```
-/noxapprove welcome_message:"Welcome to our raiding team!" delete_hours:24
-/noxreject reason:"Needs more experience" delete_hours:48
-/noxapprove welcome_message:"Great to have you!"
+# Approve with automatic deletion in 10 minutes
+/noxapprove welcome_message:"Welcome to our raiding team!" delete_time:10m
+
+# Reject with automatic deletion in 1 hour
+/noxreject reason:"Needs more experience" delete_time:1h
+
+# Approve with automatic deletion in 24 hours
+/noxapprove welcome_message:"Great to have you!" delete_time:24h
+
+# Reject without automatic deletion
 /noxreject reason:"Application incomplete"
+
+# Approve with deletion in 30 minutes
+/noxapprove delete_time:30m
 ```
+
+**Time Format Options:**
+- **Minutes:** Use `m` suffix (e.g., `10m`, `30m`, `45m`)
+- **Hours:** Use `h` suffix (e.g., `1h`, `2h`, `24h`)
+- **Backwards Compatibility:** Plain numbers are treated as hours (e.g., `24` = `24h`)
+- **Limits:** Minimum 1 minute, maximum 1 week (10080m or 168h)
 
 ## ⚙️ Customization
 
