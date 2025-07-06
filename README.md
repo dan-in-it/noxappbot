@@ -178,7 +178,7 @@ Edit the `questions` list in [`src/bot.py`](src/bot.py:21-29):
 
 ```python
 questions = [
-    "Which raid team are you applying to? Weekday (Tues/Wed/Thurs), Weekend (Fri/Sat/Sun), Floater/Casual",
+    "Which raid team are you applying to? Weekday (Tues/Mon), Weekend (Fri/Sat/Sun), (10m Wed/Thurs), Floater/Casual",
     "Have you reviewed the raid schedule for the team you're applying for?",
     "Is there a certain class/spec/role that you prefer to play?",
     "Please provide a link to your Warcraft Logs page for the character(s) you're applying with",
