@@ -112,12 +112,8 @@ class ApplicationHandler:
     async def complete_application(self):
         """Complete the application and create the channel"""
         try:
-            # Validate category
-            if INTERVIEW_CATEGORY_ID is None:
-                await self.user.send("❌ Interview category not configured. Please contact an officer.")
-                return
-            
-            category_id = int(INTERVIEW_CATEGORY_ID)
+            # INTERVIEW_CATEGORY_ID is guaranteed to be non-None due to startup validation
+            category_id = int(INTERVIEW_CATEGORY_ID)  # type: ignore
             category = self.guild.get_channel(category_id)
             
             if not category or not isinstance(category, discord.CategoryChannel):
