@@ -38,6 +38,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 questions = [
     "Which raid team are you applying to? Weekday (Tues/Wed/Thurs), Weekend (Fri/Sat/Sun), Floater/Casual",
     "Have you reviewed the raid schedule for the team you're applying for?",
+    "How did you hear about us?",
     "Is there a certain class/spec/role that you prefer to play?",
     "Please provide a link to your Warcraft Logs page for the character(s) you're applying with",
     "Do you currently have any friends or family in the guild? If so, who?",
@@ -171,7 +172,11 @@ class ApplicationHandler:
             
             embed.set_footer(text=f"Application submitted by {self.user} ({self.user.id})")
             
-            await interview_channel.send(embed=embed)
+            # Send the embed with mentions
+            await interview_channel.send(
+                content=f"{self.user.mention} <@&616354080704430130>",
+                embed=embed
+            )
             
             # Notify user of completion
             completion_embed = discord.Embed(
