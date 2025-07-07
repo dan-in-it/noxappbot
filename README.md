@@ -15,6 +15,8 @@ A Discord bot designed to streamline the guild application process for World of 
 - **⚙️ Easy Configuration:** Environment-based configuration with validation
 - **⏰ Automatic Channel Cleanup:** Optional scheduled deletion of application channels
 - **✅ Application Management:** Built-in approve/reject commands with notifications
+- **📬 DM Notification Status:** Officers receive immediate feedback on whether DM notifications were delivered successfully
+- **🔄 Robust User Lookup:** Fallback mechanisms to ensure users are found even when not in server cache
 
 ## 📋 Prerequisites
 
@@ -127,7 +129,7 @@ INFO:__main__:Application bot is ready and listening for applications
    - User clicks "Apply to Guild" button
    - Bot sends first question via DM
    - User responds in DM, bot automatically sends next question
-   - Process continues until all 7 questions are answered
+   - Process continues until all 8 questions are answered
    - Bot creates private channel: `application-{username}`
    - Application is posted as an embed in the new channel
    - User gets confirmation with channel link
@@ -144,6 +146,7 @@ INFO:__main__:Application bot is ready and listening for applications
 - **Access Control:** Only the applicant and configured roles can see the channel
 - **Review Process:** Officers can discuss applications privately in these channels
 - **Approval/Rejection:** Use slash commands to approve or reject with automatic notifications
+- **DM Status Feedback:** Officers receive immediate confirmation of whether DM notifications were delivered
 - **Automatic Cleanup:** Optionally schedule channel deletion after approval/rejection
 
 **Command Examples:**
@@ -174,17 +177,18 @@ INFO:__main__:Application bot is ready and listening for applications
 
 ### Modifying Questions
 
-Edit the `questions` list in [`src/bot.py`](src/bot.py:21-29):
+Edit the `questions` list in [`src/bot.py`](src/bot.py:38-47):
 
 ```python
 questions = [
-    "Which raid team are you applying to? Weekday (Tues/Mon), Weekend (Fri/Sat/Sun), (10m Wed/Thurs), Floater/Casual",
+    "Which raid team are you applying to? Weekday (Tues/Wed/Thurs), Weekend (Fri/Sat/Sun), Floater/Casual",
     "Have you reviewed the raid schedule for the team you're applying for?",
+    "How did you hear about us?",
     "Is there a certain class/spec/role that you prefer to play?",
     "Please provide a link to your Warcraft Logs page for the character(s) you're applying with",
     "Do you currently have any friends or family in the guild? If so, who?",
     "Tell us about yourself and your raiding experience",
-    "Any additional comments/questions?"
+    "Any additional comments/questions?",
 ]
 ```
 
@@ -192,19 +196,24 @@ questions = [
 
 ### Adding Officer/Admin Role Access
 
-To give specific roles access to application channels, modify the `overwrites` in [`src/bot.py`](src/bot.py:95-100):
+Officer and admin roles are configured through environment variables in your `.env` file. The bot automatically grants these roles access to application channels and permission to use approval/rejection commands.
 
-```python
-# Get your officer role ID (right-click role → Copy ID with Developer Mode enabled)
-OFFICER_ROLE_ID = 123456789012345678  # Replace with actual ID
-
-# In the overwrites dictionary:
-overwrites = {
-    guild.default_role: discord.PermissionOverwrite(read_messages=False),
-    self.member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-    guild.get_role(OFFICER_ROLE_ID): discord.PermissionOverwrite(read_messages=True, send_messages=True),
-}
+**Configuration in `.env`:**
+```env
+# Optional Role Configuration
+OFFICER_ROLE_ID="123456789012345678"  # Replace with your officer role ID
+ADMIN_ROLE_ID="987654321098765432"    # Replace with your admin role ID
 ```
+
+**Getting Role IDs:**
+1. Enable Developer Mode in Discord: **User Settings → Advanced → Developer Mode**
+2. Right-click the desired role → **"Copy Role ID"**
+3. Paste the ID into your `.env` file
+
+**Permissions Granted:**
+- **Application Channel Access:** Automatic read/write access to all application channels
+- **Command Usage:** Permission to use `/noxapprove` and `/noxreject` commands
+- **Administrator Override:** Users with Administrator permission can always use commands regardless of role configuration
 
 ### Adjusting Response Handling
 
@@ -239,6 +248,15 @@ pip install discord.py python-dotenv
 - Make sure you don't have an existing application in progress
 - Verify the bot can send you direct messages
 - Contact an administrator if the issue persists
+
+**"DM notifications not working for approvals/rejections"**
+- Officers will see a status message indicating if the DM was sent successfully
+- Common issues include:
+  - User has DMs disabled from server members
+  - User left the server after applying
+  - User blocked the bot
+- The bot will attempt to fetch users from Discord's API if they're not in the server cache
+- Check the bot logs for detailed error information
 
 ### Validation Script
 
