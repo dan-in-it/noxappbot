@@ -170,6 +170,9 @@ class ApplicationHandler:
             for i, question in enumerate(questions):
                 embed.add_field(name=f"Q{i+1}: {question}", value=self.answers[i], inline=False)
             
+            # Add Discord ID as a field for easy extraction
+            embed.add_field(name="Discord ID", value=str(self.user.id), inline=False)
+            
             embed.set_footer(text=f"Application submitted by {self.user} ({self.user.id})")
             
             # Send the embed with mentions
@@ -430,14 +433,29 @@ async def reject_application(
     
     # Try to notify the applicant via DM
     try:
-        # Find the applicant by looking for them in channel permissions
+        # Find the applicant by extracting Discord ID from the application embed
         applicant = None
-        for overwrite in channel.overwrites:
-            if isinstance(overwrite, discord.Member) and overwrite != interaction.guild.me:
-                # Check if this member has specific permissions (not a role)
-                if channel.overwrites[overwrite].read_messages is True:
-                    applicant = overwrite
-                    break
+        applicant_id = None
+        
+        # Look for the application embed in the channel
+        async for message in channel.history(limit=50):
+            if message.embeds and message.author == interaction.guild.me:
+                embed = message.embeds[0]
+                if embed.title and "Application from" in embed.title:
+                    # Look for Discord ID field in the embed
+                    for field in embed.fields:
+                        if field.name == "Discord ID" and field.value:
+                            try:
+                                applicant_id = int(field.value)
+                                break
+                            except ValueError:
+                                continue
+                    if applicant_id:
+                        break
+        
+        # Get the applicant member object using the ID
+        if applicant_id:
+            applicant = interaction.guild.get_member(applicant_id)
         
         if applicant:
             dm_embed = discord.Embed(
@@ -578,14 +596,29 @@ async def approve_application(
     
     # Try to notify the applicant via DM
     try:
-        # Find the applicant by looking for them in channel permissions
+        # Find the applicant by extracting Discord ID from the application embed
         applicant = None
-        for overwrite in channel.overwrites:
-            if isinstance(overwrite, discord.Member) and overwrite != interaction.guild.me:
-                # Check if this member has specific permissions (not a role)
-                if channel.overwrites[overwrite].read_messages is True:
-                    applicant = overwrite
-                    break
+        applicant_id = None
+        
+        # Look for the application embed in the channel
+        async for message in channel.history(limit=50):
+            if message.embeds and message.author == interaction.guild.me:
+                embed = message.embeds[0]
+                if embed.title and "Application from" in embed.title:
+                    # Look for Discord ID field in the embed
+                    for field in embed.fields:
+                        if field.name == "Discord ID" and field.value:
+                            try:
+                                applicant_id = int(field.value)
+                                break
+                            except ValueError:
+                                continue
+                    if applicant_id:
+                        break
+        
+        # Get the applicant member object using the ID
+        if applicant_id:
+            applicant = interaction.guild.get_member(applicant_id)
         
         if applicant:
             dm_embed = discord.Embed(
