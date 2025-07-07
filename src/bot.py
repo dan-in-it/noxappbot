@@ -465,15 +465,28 @@ async def reject_application(
             logger.error(f"Could not find Discord ID in application embed for channel {channel.name}")
             dm_status = "❌ Could not find applicant Discord ID"
         else:
-            # Get the applicant member object using the ID
-            applicant = interaction.guild.get_member(applicant_id)
+            # Try to get the applicant user object using the ID
+            applicant = None
+            try:
+                # First try to get from guild cache
+                applicant = interaction.guild.get_member(applicant_id)
+                if applicant:
+                    logger.info(f"Found applicant in guild cache: {applicant.display_name} ({applicant.id})")
+                else:
+                    # If not in cache, fetch directly from Discord API
+                    logger.info(f"Member not in cache, fetching from Discord API...")
+                    applicant = await bot.fetch_user(applicant_id)
+                    logger.info(f"Fetched applicant from API: {applicant.display_name} ({applicant.id})")
+            except discord.NotFound:
+                logger.error(f"User with ID {applicant_id} not found on Discord")
+                dm_status = "❌ User not found on Discord"
+                applicant = None
+            except Exception as e:
+                logger.error(f"Error fetching user {applicant_id}: {e}")
+                dm_status = f"❌ Error fetching user: {str(e)}"
+                applicant = None
             
-            if not applicant:
-                logger.error(f"Could not find member with ID {applicant_id} in guild")
-                dm_status = "❌ Applicant not found in server"
-            else:
-                logger.info(f"Found applicant: {applicant.display_name} ({applicant.id})")
-                
+            if applicant:
                 dm_embed = discord.Embed(
                     title="Application Update",
                     description=f"Your application to **{interaction.guild.name}** has been reviewed.",
@@ -654,15 +667,28 @@ async def approve_application(
             logger.error(f"Could not find Discord ID in application embed for channel {channel.name}")
             dm_status = "❌ Could not find applicant Discord ID"
         else:
-            # Get the applicant member object using the ID
-            applicant = interaction.guild.get_member(applicant_id)
+            # Try to get the applicant user object using the ID
+            applicant = None
+            try:
+                # First try to get from guild cache
+                applicant = interaction.guild.get_member(applicant_id)
+                if applicant:
+                    logger.info(f"Found applicant in guild cache: {applicant.display_name} ({applicant.id})")
+                else:
+                    # If not in cache, fetch directly from Discord API
+                    logger.info(f"Member not in cache, fetching from Discord API...")
+                    applicant = await bot.fetch_user(applicant_id)
+                    logger.info(f"Fetched applicant from API: {applicant.display_name} ({applicant.id})")
+            except discord.NotFound:
+                logger.error(f"User with ID {applicant_id} not found on Discord")
+                dm_status = "❌ User not found on Discord"
+                applicant = None
+            except Exception as e:
+                logger.error(f"Error fetching user {applicant_id}: {e}")
+                dm_status = f"❌ Error fetching user: {str(e)}"
+                applicant = None
             
-            if not applicant:
-                logger.error(f"Could not find member with ID {applicant_id} in guild")
-                dm_status = "❌ Applicant not found in server"
-            else:
-                logger.info(f"Found applicant: {applicant.display_name} ({applicant.id})")
-                
+            if applicant:
                 dm_embed = discord.Embed(
                     title="🎉 Application Approved!",
                     description=f"Congratulations! Your application to **{interaction.guild.name}** has been approved!",
