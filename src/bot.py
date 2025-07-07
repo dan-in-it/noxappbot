@@ -432,54 +432,80 @@ async def reject_application(
     await interaction.response.send_message(embed=rejection_embed)
     
     # Try to notify the applicant via DM
+    dm_status = "❌ Failed to send DM"
     try:
         # Find the applicant by extracting Discord ID from the application embed
         applicant = None
         applicant_id = None
         
+        logger.info(f"Looking for application embed in channel {channel.name}")
+        
         # Look for the application embed in the channel
         async for message in channel.history(limit=50):
             if message.embeds and message.author == interaction.guild.me:
                 embed = message.embeds[0]
+                logger.info(f"Found embed with title: {embed.title}")
                 if embed.title and "Application from" in embed.title:
+                    logger.info(f"Found application embed, checking for Discord ID field")
                     # Look for Discord ID field in the embed
                     for field in embed.fields:
+                        logger.info(f"Checking field: {field.name} = {field.value}")
                         if field.name == "Discord ID" and field.value:
                             try:
                                 applicant_id = int(field.value)
+                                logger.info(f"Extracted applicant ID: {applicant_id}")
                                 break
                             except ValueError:
+                                logger.error(f"Could not parse Discord ID: {field.value}")
                                 continue
                     if applicant_id:
                         break
         
-        # Get the applicant member object using the ID
-        if applicant_id:
-            applicant = interaction.guild.get_member(applicant_id)
-        
-        if applicant:
-            dm_embed = discord.Embed(
-                title="Application Update",
-                description=f"Your application to **{interaction.guild.name}** has been reviewed.",
-                color=discord.Color.red()
-            )
-            dm_embed.add_field(name="Status", value="❌ Rejected", inline=True)
-            dm_embed.add_field(name="Reason", value=reason, inline=False)
-            dm_embed.add_field(
-                name="What's Next?",
-                value="You're welcome to apply again in the future. Feel free to reach out to our officers if you have any questions.",
-                inline=False
-            )
-            
-            await applicant.send(embed=dm_embed)
-            logger.info(f"Sent rejection notification to {applicant.display_name}")
+        if not applicant_id:
+            logger.error(f"Could not find Discord ID in application embed for channel {channel.name}")
+            dm_status = "❌ Could not find applicant Discord ID"
         else:
-            logger.warning(f"Could not find applicant for channel {channel.name}")
+            # Get the applicant member object using the ID
+            applicant = interaction.guild.get_member(applicant_id)
+            
+            if not applicant:
+                logger.error(f"Could not find member with ID {applicant_id} in guild")
+                dm_status = "❌ Applicant not found in server"
+            else:
+                logger.info(f"Found applicant: {applicant.display_name} ({applicant.id})")
+                
+                dm_embed = discord.Embed(
+                    title="Application Update",
+                    description=f"Your application to **{interaction.guild.name}** has been reviewed.",
+                    color=discord.Color.red()
+                )
+                dm_embed.add_field(name="Status", value="❌ Rejected", inline=True)
+                dm_embed.add_field(name="Reason", value=reason, inline=False)
+                dm_embed.add_field(
+                    name="What's Next?",
+                    value="You're welcome to apply again in the future. Feel free to reach out to our officers if you have any questions.",
+                    inline=False
+                )
+                
+                await applicant.send(embed=dm_embed)
+                logger.info(f"Successfully sent rejection notification to {applicant.display_name}")
+                dm_status = "✅ DM sent successfully"
             
     except discord.Forbidden:
-        logger.warning(f"Could not send DM to applicant for channel {channel.name}")
+        logger.warning(f"Could not send DM to applicant - DMs may be disabled")
+        dm_status = "❌ DMs disabled or blocked"
     except Exception as e:
         logger.error(f"Error sending rejection DM: {e}")
+        dm_status = f"❌ Error: {str(e)}"
+    
+    # Send a follow-up message to the officer about DM status
+    try:
+        await interaction.followup.send(
+            f"**DM Notification Status:** {dm_status}",
+            ephemeral=True
+        )
+    except Exception as e:
+        logger.error(f"Could not send DM status follow-up: {e}")
     
     # Schedule channel deletion if requested
     if delete_seconds is not None:
@@ -595,54 +621,80 @@ async def approve_application(
     await interaction.response.send_message(embed=acceptance_embed)
     
     # Try to notify the applicant via DM
+    dm_status = "❌ Failed to send DM"
     try:
         # Find the applicant by extracting Discord ID from the application embed
         applicant = None
         applicant_id = None
         
+        logger.info(f"Looking for application embed in channel {channel.name}")
+        
         # Look for the application embed in the channel
         async for message in channel.history(limit=50):
             if message.embeds and message.author == interaction.guild.me:
                 embed = message.embeds[0]
+                logger.info(f"Found embed with title: {embed.title}")
                 if embed.title and "Application from" in embed.title:
+                    logger.info(f"Found application embed, checking for Discord ID field")
                     # Look for Discord ID field in the embed
                     for field in embed.fields:
+                        logger.info(f"Checking field: {field.name} = {field.value}")
                         if field.name == "Discord ID" and field.value:
                             try:
                                 applicant_id = int(field.value)
+                                logger.info(f"Extracted applicant ID: {applicant_id}")
                                 break
                             except ValueError:
+                                logger.error(f"Could not parse Discord ID: {field.value}")
                                 continue
                     if applicant_id:
                         break
         
-        # Get the applicant member object using the ID
-        if applicant_id:
-            applicant = interaction.guild.get_member(applicant_id)
-        
-        if applicant:
-            dm_embed = discord.Embed(
-                title="🎉 Application Approved!",
-                description=f"Congratulations! Your application to **{interaction.guild.name}** has been approved!",
-                color=discord.Color.green()
-            )
-            dm_embed.add_field(name="Status", value="✅ Approved", inline=True)
-            dm_embed.add_field(name="Welcome Message", value=welcome_message, inline=False)
-            dm_embed.add_field(
-                name="What's Next?",
-                value="You should now have access to the guild! Check out the guild channels and feel free to introduce yourself.",
-                inline=False
-            )
-            
-            await applicant.send(embed=dm_embed)
-            logger.info(f"Sent approval notification to {applicant.display_name}")
+        if not applicant_id:
+            logger.error(f"Could not find Discord ID in application embed for channel {channel.name}")
+            dm_status = "❌ Could not find applicant Discord ID"
         else:
-            logger.warning(f"Could not find applicant for channel {channel.name}")
+            # Get the applicant member object using the ID
+            applicant = interaction.guild.get_member(applicant_id)
+            
+            if not applicant:
+                logger.error(f"Could not find member with ID {applicant_id} in guild")
+                dm_status = "❌ Applicant not found in server"
+            else:
+                logger.info(f"Found applicant: {applicant.display_name} ({applicant.id})")
+                
+                dm_embed = discord.Embed(
+                    title="🎉 Application Approved!",
+                    description=f"Congratulations! Your application to **{interaction.guild.name}** has been approved!",
+                    color=discord.Color.green()
+                )
+                dm_embed.add_field(name="Status", value="✅ Approved", inline=True)
+                dm_embed.add_field(name="Welcome Message", value=welcome_message, inline=False)
+                dm_embed.add_field(
+                    name="What's Next?",
+                    value="You should now have access to the guild! Check out the guild channels and feel free to introduce yourself.",
+                    inline=False
+                )
+                
+                await applicant.send(embed=dm_embed)
+                logger.info(f"Successfully sent approval notification to {applicant.display_name}")
+                dm_status = "✅ DM sent successfully"
             
     except discord.Forbidden:
-        logger.warning(f"Could not send DM to applicant for channel {channel.name}")
+        logger.warning(f"Could not send DM to applicant - DMs may be disabled")
+        dm_status = "❌ DMs disabled or blocked"
     except Exception as e:
         logger.error(f"Error sending approval DM: {e}")
+        dm_status = f"❌ Error: {str(e)}"
+    
+    # Send a follow-up message to the officer about DM status
+    try:
+        await interaction.followup.send(
+            f"**DM Notification Status:** {dm_status}",
+            ephemeral=True
+        )
+    except Exception as e:
+        logger.error(f"Could not send DM status follow-up: {e}")
     
     # Schedule channel deletion if requested
     if delete_seconds is not None:
