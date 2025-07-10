@@ -88,14 +88,111 @@ class ApplicationHandler:
             await self.cancel_application()
             return
         
-        # Store the answer
-        self.answers.append(message.content)
+        # Handle "proceed" command for long answers
+        if message.content.lower() == 'proceed' and hasattr(self, 'pending_long_answer'):
+            answer = self.validate_and_truncate_answer(self.pending_long_answer)
+            delattr(self, 'pending_long_answer')
+        else:
+            # Remove excessive whitespace
+            clean_content = ' '.join(message.content.split())
+            
+            # Check if answer is too long
+            if len(clean_content) > 800:
+                embed = discord.Embed(
+                    title="⚠️ Answer Too Long",
+                    description=f"Your answer is **{len(clean_content)} characters** long, but the maximum is **800 characters**.",
+                    color=discord.Color.orange()
+                )
+                embed.add_field(
+                    name="Your Options:",
+                    value="• **Shorten your answer** and send it again\n• **Type 'proceed'** to automatically truncate your answer\n• **Type 'cancel'** to cancel the application",
+                    inline=False
+                )
+                embed.set_footer(text="If you choose to proceed, your answer will be cut off at 800 characters.")
+                await self.user.send(embed=embed)
+                
+                # Store the long answer for potential truncation
+                self.pending_long_answer = clean_content
+                return
+            
+            answer = clean_content
+        
+        # Check if answer is just spam (repeated characters/stickers)
+        if self.is_spam_answer(answer):
+            embed = discord.Embed(
+                title="⚠️ Invalid Answer",
+                description="Your answer appears to contain excessive repeated characters or stickers. Please provide a meaningful response to the question.",
+                color=discord.Color.orange()
+            )
+            embed.set_footer(text="Please try again with a proper answer, or type 'cancel' to cancel the application.")
+            await self.user.send(embed=embed)
+            return
+        
+        # Store the processed answer
+        self.answers.append(answer)
         self.current_question += 1
         
         if self.current_question < len(questions):
             await self.send_current_question()
         else:
             await self.complete_application()
+    
+    def validate_and_truncate_answer(self, content):
+        """Validate and truncate answer to prevent Discord limits"""
+        # Maximum characters per answer (leaving room for embed formatting and truncation message)
+        MAX_ANSWER_LENGTH = 800
+        TRUNCATION_MESSAGE = "... [Answer truncated due to length - {} characters total]"
+        
+        # Remove excessive whitespace
+        content = ' '.join(content.split())
+        
+        # Truncate if too long
+        if len(content) > MAX_ANSWER_LENGTH:
+            # Calculate how much space we need for the truncation message
+            truncation_msg = TRUNCATION_MESSAGE.format(len(content))
+            available_space = MAX_ANSWER_LENGTH - len(truncation_msg)
+            
+            # Ensure we have enough space for meaningful content
+            if available_space < 50:
+                available_space = 50
+                truncation_msg = "... [Truncated]"
+            
+            truncated_content = content[:available_space].rstrip()
+            
+            # Try to truncate at a word boundary
+            last_space = truncated_content.rfind(' ')
+            if last_space > available_space * 0.8:  # Only if we don't lose too much
+                truncated_content = truncated_content[:last_space]
+            
+            return f"{truncated_content}{truncation_msg}"
+        
+        return content
+    
+    def is_spam_answer(self, content):
+        """Check if answer appears to be spam (repeated characters/stickers)"""
+        if len(content) < 10:
+            return False
+        
+        # Check for excessive repeated characters (more than 80% of the content)
+        char_counts = {}
+        for char in content:
+            char_counts[char] = char_counts.get(char, 0) + 1
+        
+        # If any single character makes up more than 80% of the content, it's likely spam
+        max_char_ratio = max(char_counts.values()) / len(content)
+        if max_char_ratio > 0.8:
+            return True
+        
+        # Check for repeated patterns (like sticker spam)
+        # Look for sequences of the same 2-3 character pattern repeated
+        for pattern_length in [2, 3, 4]:
+            if len(content) >= pattern_length * 10:  # Only check if content is long enough
+                pattern = content[:pattern_length]
+                pattern_count = content.count(pattern)
+                if pattern_count > len(content) / (pattern_length * 2):  # Pattern appears too frequently
+                    return True
+        
+        return False
     
     async def cancel_application(self):
         """Cancel the application process"""
@@ -161,14 +258,39 @@ class ApplicationHandler:
                 overwrites=overwrites,
             )
             
-            # Create and send application embed
+            # Create and send application embed with safety checks
             embed = discord.Embed(
                 title=f"New Application from {self.user.display_name}",
                 color=discord.Color.blue(),
             )
             
+            # Add questions and answers with additional safety checks
+            total_embed_length = len(embed.title or "") + len(embed.description or "")
+            
             for i, question in enumerate(questions):
-                embed.add_field(name=f"Q{i+1}: {question}", value=self.answers[i], inline=False)
+                # Ensure field name doesn't exceed Discord's 256 character limit
+                field_name = f"Q{i+1}: {question}"
+                if len(field_name) > 256:
+                    field_name = field_name[:253] + "..."
+                
+                # Ensure field value doesn't exceed Discord's 1024 character limit
+                field_value = self.answers[i]
+                if len(field_value) > 1024:
+                    field_value = field_value[:1021] + "..."
+                
+                # Check if adding this field would exceed the total embed limit (6000 chars)
+                field_length = len(field_name) + len(field_value)
+                if total_embed_length + field_length > 5500:  # Leave some buffer
+                    # Add a truncation notice instead
+                    embed.add_field(
+                        name="⚠️ Application Truncated",
+                        value="Some answers were too long and have been truncated. Full responses are available in the application logs.",
+                        inline=False
+                    )
+                    break
+                
+                embed.add_field(name=field_name, value=field_value, inline=False)
+                total_embed_length += field_length
             
             # Add Discord ID as a field for easy extraction
             embed.add_field(name="Discord ID", value=str(self.user.id), inline=False)
