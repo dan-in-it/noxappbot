@@ -224,7 +224,7 @@ class ApplicationHandler:
             # Set up permissions
             overwrites = {
                 self.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                self.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                self.user: discord.PermissionOverwrite(read_messages=True, send_messages=True, read_message_history=True, use_public_threads=True, add_reactions=True),
             }
             
             # Add officer role access if configured
@@ -232,7 +232,7 @@ class ApplicationHandler:
                 try:
                     officer_role = self.guild.get_role(int(OFFICER_ROLE_ID))
                     if officer_role:
-                        overwrites[officer_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                        overwrites[officer_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True, read_message_history=True, use_public_threads=True, add_reactions=True)
                         logger.info(f"Added officer role {officer_role.name} to application channel permissions")
                     else:
                         logger.warning(f"Officer role with ID {OFFICER_ROLE_ID} not found in guild")
@@ -244,7 +244,7 @@ class ApplicationHandler:
                 try:
                     admin_role = self.guild.get_role(int(ADMIN_ROLE_ID))
                     if admin_role:
-                        overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                        overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True, read_message_history=True, use_public_threads=True, add_reactions=True)
                         logger.info(f"Added admin role {admin_role.name} to application channel permissions")
                     else:
                         logger.warning(f"Admin role with ID {ADMIN_ROLE_ID} not found in guild")
