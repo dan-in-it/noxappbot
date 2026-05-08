@@ -36,7 +36,7 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 questions = [
-    "Which raid team are you applying to? Weekend (Fri/Sat), Floater/Casual, 10M Weasals Weekday Team, 10M Casual Weekday Team, TBC Team",
+    "Which raid team are you applying to? TBC Team, Floater/Casual (TBC), 10M Weasals Weekday Team (MoP), 10M Cumby Team (MoP)",
     "Have you reviewed the raid schedule for the team you're applying for?",
     "How did you hear about us?",
     "Is there a certain class/spec/role that you prefer to play?",
