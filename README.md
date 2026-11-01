@@ -1,6 +1,6 @@
 # NoxAppBot - Discord Guild Application Bot
 
-A Discord bot designed to streamline the guild application process for World of Warcraft guilds. Applicants answer questions through private messages, and their responses are posted in private channels for review by officers.
+A Discord bot designed to streamline the guild application process for our WoW: Forever guild. Applicants answer questions through private messages, and their responses are posted in private channels for review by officers.
 
 ## ✨ Features
 
@@ -15,12 +15,15 @@ A Discord bot designed to streamline the guild application process for World of 
 - **⚙️ Easy Configuration:** Environment-based configuration with validation
 - **⏰ Automatic Channel Cleanup:** Optional scheduled deletion of application channels
 - **✅ Application Management:** Built-in approve/reject commands with notifications
+- **💾 Saved Progress:** Draft answers, edits, decisions, and cleanup deadlines survive restarts
+- **📝 Review Before Submission:** Back/Edit commands and an explicit final submit step
+- **🎉 Approval Roles:** Grants both configured membership roles before confirming approval
 - **📬 DM Notification Status:** Officers receive immediate feedback on whether DM notifications were delivered successfully
 - **🔄 Robust User Lookup:** Fallback mechanisms to ensure users are found even when not in server cache
 
 ## 📋 Prerequisites
 
-- **Python 3.8+** installed on your system
+- **Python 3.10+** installed on your system
 - **Discord account** with a server where you have administrative permissions
 - **Basic command line knowledge** for setup and running
 
@@ -83,7 +86,7 @@ LOG_LEVEL="INFO"
 **Bot Settings:**
 - **APPLICATION_CHANNEL_PREFIX:** Channel name prefix (default: `application`)
 - **LOG_LEVEL:** Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`)
-- **APPLICATION_DB_PATH:** SQLite application registry (default: `data/applications.sqlite3`). Relative paths resolve from the repository root. Keep this file on persistent storage and back it up across restarts and deployments. SQLite is included with Python; no database service is needed.
+- **APPLICATION_DB_PATH:** SQLite application data (default: `data/applications.sqlite3`). Relative paths resolve from the repository root. Keep this file on persistent storage and back it up across restarts and deployments. SQLite is included with Python; no database service is needed. The database contains private applicant answers and decision history, so restrict file access and protect its backups. Responses and decisions remain in the database after channel cleanup; cancellation removes an unfinished draft.
 
 The bot runs as one process and records each application by server, channel, and immutable Discord user ID. Renaming a user or channel does not release the duplicate check. A retained channel continues to block reapplication after approval or rejection; the record is released only after the channel is confirmed deleted.
 
@@ -98,6 +101,7 @@ Before requesting a new channel, the bot commits a reservation in SQLite. A time
 1. In Discord Developer Portal: **OAuth2 → URL Generator**
 2. **Scopes:** Select `bot` and `applications.commands`
 3. **Bot Permissions:**
+   - ✅ Manage Roles
    - ✅ Manage Channels
    - ✅ Send Messages
    - ✅ Embed Links
@@ -107,10 +111,10 @@ Before requesting a new channel, the bot commits a reservation in SQLite. A time
 ### 5. Test Configuration (Optional but Recommended)
 
 ```bash
-python test_bot.py
+python -m unittest -v test_application_security test_application_workflow
 ```
 
-This validates your setup before running the bot.
+This runs offline regression tests with temporary databases and mocked Discord calls; it does not validate your live Discord permissions.
 
 ### 6. Start the Bot
 
@@ -138,15 +142,17 @@ INFO:__main__:Application bot is ready and listening for applications
    - User clicks "Apply to Guild" button
    - Bot sends first question via DM
    - User responds in DM, bot automatically sends next question
-   - Process continues until all 8 questions are answered
-   - Bot creates private channel: `application-{username}`
-   - Application is posted as an embed in the new channel
+   - Progress is saved after every answer; use `resume` in DMs or click Apply again after a restart
+   - After all 8 questions, review the answers and type `submit`
+   - Use `back` or `edit N` to change an answer, `review` to see saved answers, or `cancel` to discard the draft
+   - Only after `submit`, the bot creates private channel: `application-{username}`
+   - The complete application is posted in one or more embeds in the new channel
    - User gets confirmation with channel link
 
 ### Managing Applications
 
 **Available Commands:**
-- `/noxapprove` - Approve an application with optional welcome message and flexible channel cleanup timing
+- `/noxapprove` - Grant both membership roles and approve an application, with an optional welcome message and cleanup timing
 - `/noxreject` - Reject an application with optional reason and flexible channel cleanup timing
 - `/noxsync` - Force sync slash commands (Admin only)
 
@@ -154,9 +160,9 @@ INFO:__main__:Application bot is ready and listening for applications
 - **Private Channels:** Each application gets its own private channel
 - **Access Control:** Only the applicant and configured roles can see the channel
 - **Review Process:** Officers can discuss applications privately in these channels
-- **Approval/Rejection:** Use slash commands to approve or reject with automatic notifications
+- **Approval/Rejection:** Use slash commands to approve or reject with automatic notifications. The status, reviewer, note, and decision time are saved; completed decisions cannot be repeated or reversed with these commands.
 - **DM Status Feedback:** Officers receive immediate confirmation of whether DM notifications were delivered
-- **Automatic Cleanup:** Optionally schedule channel deletion after approval/rejection
+- **Automatic Cleanup:** Optionally schedule channel deletion after approval/rejection. Deadlines survive restarts; overdue deletions run when the bot returns, after rechecking the channel and application record.
 
 **Command Examples:**
 ```
@@ -186,22 +192,22 @@ INFO:__main__:Application bot is ready and listening for applications
 
 ### Modifying Questions
 
-Edit the `questions` list in [`src/bot.py`](src/bot.py:38-47):
+Edit the `questions` list in [`src/bot.py`](src/bot.py). The Forever form covers character plans, interests, availability, guild expectations, experience with optional logs, referrals, and comments:
 
 ```python
 questions = [
-    "Which raid team are you applying to? TBC Team, Floater/Casual (TBC), 10M Weasals Weekday Team (MoP), 10M Cumby Team (MoP)",
-    "Have you reviewed the raid schedule for the team you're applying for?",
-    "How did you hear about us?",
-    "Is there a certain class/spec/role that you prefer to play?",
-    "Please provide a link to your Warcraft Logs page for the character(s) you're applying with",
-    "Do you currently have any friends or family in the guild? If so, who?",
-    "Tell us about yourself and your raiding experience",
-    "Any additional comments/questions?",
+    'What is your full WoW: Forever character name (or planned name)?',
+    'What class, preferred spec, and role do you plan to play? Include any alts you plan to play.',
+    'Are you interested in raiding, dungeons, PvP, or social/casual play? What are you looking for in our guild?',
+    'What is your timezone, and which days and times are you usually available? If you want to raid, what schedule can you commit to?',
+    'Have you read our guild rules and any posted raid schedule? Are there any expectations or scheduling conflicts you would like to discuss?',
+    'Tell us about yourself and your WoW experience. Warcraft Logs or other relevant links are optional; it is fine if you do not have logs.',
+    'How did you hear about us, and do you have any friends or family in the guild? If so, who?',
+    "Any additional comments or questions? You can answer 'none'.",
 ]
 ```
 
-**Important:** You can modify the number of questions as needed. The DM-based system handles any number of questions sequentially.
+**Important:** Drafts keep a snapshot of their questions so a later form update does not change the meaning of saved answers. New applications use the updated questions. Applicants edit one answer at a time; afterward they return to the review or the next unanswered question.
 
 ### Adding Officer/Admin Role Access
 
@@ -224,9 +230,26 @@ ADMIN_ROLE_ID="987654321098765432"    # Replace with your admin role ID
 - **Command Usage:** Permission to use `/noxapprove` and `/noxreject` commands
 - **Administrator Override:** Users with Administrator permission can always use commands regardless of role configuration
 
+### Approval Roles and Welcome Links
+
+The default approval roles are `616354179522363400` and `1548423178794307745`. Configure them and optional onboarding links in `.env`:
+
+```env
+APPROVAL_ROLE_IDS="616354179522363400,1548423178794307745"
+WELCOME_RULES_URL=""
+WELCOME_SCHEDULE_URL=""
+WELCOME_INTRODUCTIONS_URL=""
+```
+
+Paste Discord channel links into the welcome settings to include them in approval DMs. Blank links use general onboarding instructions, including contacting an officer for an in-game guild invitation.
+
+The bot must have **Manage Roles**, and both roles must be below its highest role and not managed by an integration. Approval uses a fresh member lookup and adds only missing roles, preserving other roles. If the member has left, a role is missing, or Discord rejects a role grant, the saved decision stays `approving`: no successful approval notification or cleanup is scheduled. Correct the issue and repeat `/noxapprove`. A partial role grant is kept and safely completed on retry, including after a restart. The original reviewer, welcome message, and cleanup duration are preserved; the cleanup countdown starts once both roles are granted and approval is saved.
+
+Final decisions are stored before notifications are attempted. A notification failure does not undo the decision; the officer receives delivery feedback. Notifications are not replayed automatically after a crash. Review the recorded status before following up manually.
+
 ### Adjusting Response Handling
 
-The DM-based system automatically handles responses of any length. Discord DM messages have a 2000 character limit, but users can send multiple messages if needed. The bot will wait for each response before proceeding to the next question.
+Send one answer per message, up to 800 characters. Longer answers prompt the applicant to shorten them or explicitly choose `proceed` to truncate. Each accepted answer is saved before advancing. The review and submission are split across messages when necessary so later answers are retained. Empty messages and attachment-only answers do not advance the form.
 
 ## 🔧 Troubleshooting
 
@@ -271,14 +294,10 @@ pip install discord.py python-dotenv
 
 Run the test script to diagnose issues:
 ```bash
-python test_bot.py
+python -m unittest -v test_application_security test_application_workflow
 ```
 
-This checks:
-- ✅ File structure
-- ✅ Dependencies installed
-- ✅ Environment variables configured
-- ✅ Bot configuration validity
+These offline tests verify bot behavior; check permissions and role ordering in your Discord server separately.
 
 ## 🛡️ Security Features
 
@@ -292,10 +311,10 @@ This checks:
 
 ## 📝 Technical Details
 
-- **Language:** Python 3.8+
+- **Language:** Python 3.10+
 - **Library:** discord.py 2.3.0+
 - **Architecture:** Event-driven with DM-based conversation flow
-- **Storage:** SQLite for application identities; in-memory sessions and deletion timers. Run one bot process per registry. Deletion timers still need to be scheduled again after a restart.
+- **Storage:** SQLite for application identities, question/answer snapshots, drafts, reviewer decisions, and absolute cleanup deadlines. Run one bot process per database. Drafts restore on the next DM or Apply click; cleanup tasks restore on startup/reconnect. Failed cleanup retains its deadline and is retried on the next startup/reconnect. Existing identity-only databases are upgraded automatically; previous decision messages are not inferred as saved decisions.
 - **Permissions:** Standard bot permissions (no privileged intents)
 
 ## 🤝 Contributing
@@ -303,16 +322,16 @@ This checks:
 Run the offline regression suite with the dependencies installed:
 
 ```bash
-python -m unittest -v test_application_security
+python -m unittest -v test_application_security test_application_workflow
 python test_bot_fixes.py
 ```
 
-The security tests call the real bot handlers using temporary SQLite files and mocked Discord I/O; they do not connect to Discord.
+The regression tests call the real bot handlers using temporary SQLite files and mocked Discord I/O; they do not connect to Discord. They cover saved drafts, editing/review, restart recovery, role assignment failures, decision persistence, and cleanup alongside the existing security checks.
 
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Test with `python test_bot.py`
+4. Test with `python -m unittest -v test_application_security test_application_workflow`
 5. Submit a pull request
 
 ## 📄 License

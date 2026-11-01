@@ -41,7 +41,7 @@ def not_found():
                             {"code": 10003, "message": "Unknown Channel"})
 
 
-class ApplicationSecurityTests(unittest.IsolatedAsyncioTestCase):
+class ApplicationTestCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         log_context = patch.object(subject.logger, "disabled", True)
         log_context.start()
@@ -56,6 +56,10 @@ class ApplicationSecurityTests(unittest.IsolatedAsyncioTestCase):
             "_registry_ready": set(),
             "_registry_locks": {},
             "ongoing_applications": {},
+            "_decision_locks": {},
+            "_deletion_tasks": {},
+            "APPROVAL_ROLE_IDS": (616354179522363400, 1548423178794307745),
+            "ONBOARDING_LINKS": {},
         }.items():
             context = patch.object(subject, name, value, create=True)
             context.start()
@@ -67,6 +71,7 @@ class ApplicationSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.guild.id, self.guild.name = 42, "Test Guild"
         self.guild.me = member(9999, "bot")
         self.guild.me.bot = True
+        self.guild.me.guild_permissions.manage_roles = True
         self.guild.default_role = MagicMock(spec=discord.Role)
         self.category = MagicMock(spec=discord.CategoryChannel)
         self.category.id = 10
@@ -75,7 +80,15 @@ class ApplicationSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.guild.channels = [self.category]
         self.guild.get_channel.side_effect = self.channels.get
         self.guild.get_member.side_effect = lambda uid: self.applicant if uid == 1001 else None
-        self.guild.get_role.return_value = MagicMock(spec=discord.Role)
+        self.approval_roles = []
+        for role_id in subject.APPROVAL_ROLE_IDS:
+            role = MagicMock(spec=discord.Role)
+            role.id = role_id
+            role.is_assignable.return_value = True
+            self.approval_roles.append(role)
+        self.guild.get_role.side_effect = lambda role_id: next(
+            (role for role in self.approval_roles if role.id == role_id), MagicMock(spec=discord.Role))
+        self.guild.fetch_member.side_effect = lambda user_id: self.applicant
         self.guild.fetch_channels.side_effect = lambda: list(self.channels.values())
 
         async def fetch(channel_id):
@@ -95,6 +108,17 @@ class ApplicationSecurityTests(unittest.IsolatedAsyncioTestCase):
         context = patch.object(subject.bot, "process_commands", AsyncMock())
         context.start()
         self.addCleanup(context.stop)
+        guild_context = patch.object(subject.bot, "get_guild", return_value=self.guild)
+        guild_context.start()
+        self.addCleanup(guild_context.stop)
+
+        async def stop_tasks():
+            tasks = list(subject._deletion_tasks.values())
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        self.addAsyncCleanup(stop_tasks)
 
     def channel(self, channel_id=2000, name="application-archive", category_id=10):
         channel = MagicMock(spec=discord.TextChannel)
@@ -140,6 +164,7 @@ class ApplicationSecurityTests(unittest.IsolatedAsyncioTestCase):
         await subject.ApplicationView().apply.callback(self.interaction())
         for index in range(len(subject.questions)):
             await subject.on_message(self.message(f"Ordinary application answer number {index}."))
+        await subject.on_message(self.message("submit"))
 
     def register(self, channel, applicant_id=1001, message_id=5000):
         record = ApplicationRecord(self.guild.id, channel.id, applicant_id, message_id)
@@ -157,12 +182,15 @@ class ApplicationSecurityTests(unittest.IsolatedAsyncioTestCase):
 
     def final_handler(self):
         handler = subject.ApplicationHandler(self.applicant, self.guild)
-        handler.state = "active"
-        handler.answers = ["A normal prior answer."] * (len(subject.questions) - 1)
-        handler.current_question = len(subject.questions) - 1
+        handler.state = "review"
+        handler.answers = ["A normal prior answer."] * len(subject.questions)
+        handler.current_question = len(subject.questions)
         subject.ongoing_applications[self.applicant.id] = handler
+        handler.save_progress()
         return handler
 
+
+class ApplicationSecurityTests(ApplicationTestCase):
     async def test_both_staff_commands_reject_unrelated_prefix_channel(self):
         for command in (subject.approve_application, subject.reject_application):
             with self.subTest(command=command.name):
@@ -185,16 +213,18 @@ class ApplicationSecurityTests(unittest.IsolatedAsyncioTestCase):
                 channel.send.assert_not_awaited()
 
     async def test_registered_renamed_channel_preserves_both_staff_commands(self):
-        channel = self.channel(name="staff-renamed-review")
-        record = self.register(channel)
         for command, title in ((subject.approve_application, "✅ Application Approved"),
                                (subject.reject_application, "❌ Application Rejected")):
             with self.subTest(command=command.name):
+                channel = self.channel(2000 + len(self.channels), name="staff-renamed-review")
+                record = self.register(channel)
                 interaction = self.interaction(self.officer, channel)
                 with patch.object(subject, "schedule_channel_deletion", AsyncMock()) as schedule:
                     await command.callback(interaction, delete_time="1m")
                     await asyncio.sleep(0)
-                    schedule.assert_awaited_once_with(self.guild, record, 60)
+                    schedule.assert_awaited_once()
+                    self.assertEqual(schedule.call_args.args[:2], (self.guild, record))
+                    self.assertAlmostEqual(schedule.call_args.args[2], 60, delta=1)
                 self.assertEqual(channel.send.call_args.kwargs["embed"].title, title)
                 self.assertIn(str(self.applicant.id), channel.send.call_args.kwargs["embed"].description)
                 self.assertIn("DM sent successfully", interaction.followup.send.call_args.args[0])
@@ -215,9 +245,8 @@ class ApplicationSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.register(channel)
         self.guild.get_member.return_value = None
         self.guild.get_member.side_effect = None
-        with patch.object(subject.bot, "fetch_user", AsyncMock(return_value=self.applicant)) as fetch:
-            await subject.approve_application.callback(self.interaction(self.officer, channel))
-            fetch.assert_awaited_once_with(1001)
+        await subject.approve_application.callback(self.interaction(self.officer, channel))
+        self.guild.fetch_member.assert_awaited_once_with(1001)
         self.applicant.send.assert_awaited_once()
 
     async def test_staff_command_rejects_current_category_despite_stale_interaction(self):
@@ -234,6 +263,8 @@ class ApplicationSecurityTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(mutation=mutation):
                 channel = self.channel(2100 + len(self.channels))
                 record = self.register(channel)
+                self.store.begin_decision(record, "rejecting", self.officer.id, "Test", 0)
+                self.store.finish_decision(record, "rejected")
                 if mutation == "moved":
                     channel.category_id = 99
                 elif mutation in ("changed", "removed"):
@@ -258,6 +289,8 @@ class ApplicationSecurityTests(unittest.IsolatedAsyncioTestCase):
     async def test_valid_cleanup_deletes_once_and_allows_reapplication(self):
         channel = self.channel()
         record = self.register(channel)
+        self.store.begin_decision(record, "rejecting", self.officer.id, "Test", 0)
+        self.store.finish_decision(record, "rejected")
         await subject.schedule_channel_deletion(self.guild, record, 0)
         channel.delete.assert_awaited_once()
         self.assertIsNone(self.store.get(self.guild.id, channel.id))
@@ -376,9 +409,9 @@ class ApplicationSecurityTests(unittest.IsolatedAsyncioTestCase):
             return await create(**kwargs)
 
         self.guild.create_text_channel.side_effect = held_create
-        first = asyncio.create_task(subject.on_message(self.message("First final answer.")))
+        first = asyncio.create_task(subject.on_message(self.message("submit")))
         await asyncio.wait_for(entered.wait(), 2)
-        second = asyncio.create_task(subject.on_message(self.message("Second final answer.")))
+        second = asyncio.create_task(subject.on_message(self.message("submit")))
         await asyncio.sleep(0)
         release.set()
         await asyncio.gather(first, second)
@@ -418,7 +451,7 @@ class ApplicationSecurityTests(unittest.IsolatedAsyncioTestCase):
             return await create(**kwargs)
 
         self.guild.create_text_channel.side_effect = held_create
-        completion = asyncio.create_task(handler.process_answer(self.message("Final answer.")))
+        completion = asyncio.create_task(handler.process_answer(self.message("submit")))
         await asyncio.wait_for(entered.wait(), 2)
         cancellation = asyncio.create_task(handler.process_answer(self.message("cancel")))
         release.set()
