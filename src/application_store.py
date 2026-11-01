@@ -69,9 +69,15 @@ class ApplicationStore:
                     delete_after INTEGER,
                     delete_at REAL,
                     approval_role_ids TEXT NOT NULL DEFAULT '[]',
+                    published_message_ids TEXT NOT NULL DEFAULT '[]',
                     PRIMARY KEY (guild_id, channel_id)
                 )
             """)
+            columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(application_workflows)")}
+            if "published_message_ids" not in columns:
+                self.connection.execute(
+                    "ALTER TABLE application_workflows ADD COLUMN published_message_ids TEXT NOT NULL DEFAULT '[]'"
+                )
             self.connection.execute("""
                 INSERT OR IGNORE INTO application_workflows (guild_id, channel_id, applicant_id)
                 SELECT guild_id, channel_id, applicant_id FROM applications
@@ -112,7 +118,7 @@ class ApplicationStore:
         if row is None:
             raise RuntimeError("Application workflow is missing")
         result = dict(row)
-        for key in ("questions", "answers", "approval_role_ids"):
+        for key in ("questions", "answers", "approval_role_ids", "published_message_ids"):
             result[key] = json.loads(result[key])
         return result
 
@@ -218,6 +224,17 @@ class ApplicationStore:
             self.connection.execute(
                 "DELETE FROM application_reservations WHERE guild_id = ? AND applicant_id = ? AND token = ?",
                 (guild_id, applicant_id, token)
+            )
+
+    def record_published(self, record, message_id):
+        with self.connection:
+            if self.get(record.guild_id, record.channel_id) != record or record.message_id is not None:
+                raise RuntimeError("Application record changed during submission")
+            published = self.workflow(record)["published_message_ids"] + [message_id]
+            self.connection.execute(
+                "UPDATE application_workflows SET published_message_ids = ? "
+                "WHERE guild_id = ? AND channel_id = ? AND applicant_id = ?",
+                (json.dumps(published), record.guild_id, record.channel_id, record.applicant_id)
             )
 
     def mark_submitted(self, record, message_id):

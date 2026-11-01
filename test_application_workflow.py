@@ -27,6 +27,36 @@ class ApplicationWorkflowTests(ApplicationTestCase):
             await subject.on_message(self.message(f"My answer to question {index + 1}."))
         return subject.ongoing_applications[self.applicant.id]
 
+    def long_answer_handler(self):
+        handler = self.final_handler()
+        handler.answers = [(f"Answer {index}. " + "A detailed response with varied words. " * 30)[:800]
+                           for index in range(len(subject.questions))]
+        handler.save_progress()
+        return handler
+
+    def fail_send_once(self, call_number, error=None):
+        create = self.guild.create_text_channel.side_effect
+
+        async def create_with_flaky_send(**kwargs):
+            channel = await create(**kwargs)
+            send, calls = channel.send.side_effect, []
+
+            async def flaky_send(*args, **kwargs):
+                calls.append(kwargs)
+                if len(calls) == call_number:
+                    raise error or discord.HTTPException(
+                        SimpleNamespace(status=500, reason="Server Error"), "Temporary failure")
+                return await send(*args, **kwargs)
+
+            channel.send.side_effect = flaky_send
+            return channel
+
+        self.guild.create_text_channel.side_effect = create_with_flaky_send
+
+    def posted_answers(self, channel):
+        return [field.value for message in channel.messages for embed in message.embeds
+                for field in embed.fields if field.name.startswith("Q")]
+
     def rejection_with_cleanup(self, seconds):
         channel = self.channel()
         record = self.register(channel)
@@ -327,6 +357,91 @@ class ApplicationWorkflowTests(ApplicationTestCase):
         self.assertEqual(self.store.workflow(record)["status"], "rejected")
         self.assertEqual(self.store.workflow(record)["decision_note"], "Saved decision")
         self.assertIsNone(self.store.workflow(record)["delete_at"])
+
+    async def test_failed_continuation_resumes_after_restart_without_duplicates(self):
+        self.fail_send_once(2)
+        answers = list(self.long_answer_handler().answers)
+        await subject.on_message(self.message("submit"))
+        channel = self.created[0]
+        record = self.store.for_applicant(42, 1001)[0]
+        self.assertIsNone(record.message_id)
+        self.assertEqual(len(self.store.workflow(record)["published_message_ids"]), 1)
+        self.assertIsNotNone(self.store.get_draft(1001))
+        self.assertIn("not every answer was posted", self.applicant.send.call_args.args[0])
+        await subject.approve_application.callback(self.interaction(self.officer, channel))
+        self.assertEqual(self.store.workflow(record)["status"], "pending")
+        self.restart()
+        self.applicant.display_name = "A considerably longer display name " * 5
+        await subject.on_message(self.message("submit"))
+        self.assertEqual(len(self.created), 1)
+        parts = len(subject.answer_embeds(subject.questions, answers, "Any title"))
+        self.assertGreater(parts, 1)
+        self.assertEqual(len(channel.messages), parts)
+        self.assertEqual(sum(any(field.name == "Discord ID" for field in message.embeds[0].fields)
+                             for message in channel.messages), 1)
+        self.assertEqual(self.posted_answers(channel), answers)
+        record = self.store.get(42, channel.id)
+        self.assertEqual(record.message_id, channel.messages[0].id)
+        self.assertIsNone(self.store.get_draft(1001))
+        await subject.approve_application.callback(self.interaction(self.officer, channel))
+        self.assertEqual(self.store.workflow(record)["status"], "approved")
+
+    async def test_failed_first_message_resumes_from_apply_after_cancel(self):
+        self.fail_send_once(1)
+        answers = list(self.long_answer_handler().answers)
+        await subject.on_message(self.message("submit"))
+        channel = self.created[0]
+        self.assertEqual(channel.messages, [])
+        await subject.on_message(self.message("cancel"))
+        self.assertIsNone(self.store.get_draft(1001))
+        interaction = self.interaction()
+        await subject.ApplicationView().apply.callback(interaction)
+        self.assertEqual(len(self.created), 1)
+        self.assertEqual(self.posted_answers(channel), answers)
+        self.assertEqual(self.store.get(42, channel.id).message_id, channel.messages[0].id)
+        self.assertIn("has been posted", interaction.followup.send.call_args.args[0])
+        self.assertNotIn(1001, subject.ongoing_applications)
+
+    async def test_edits_after_failed_post_are_flagged_when_saved_answers_are_posted(self):
+        self.fail_send_once(2)
+        answers = list(self.long_answer_handler().answers)
+        await subject.on_message(self.message("submit"))
+        await subject.on_message(self.message(f"edit {len(answers)}"))
+        await subject.on_message(self.message("A changed final answer."))
+        await subject.on_message(self.message("submit"))
+        self.assertEqual(self.posted_answers(self.created[0]), answers)
+        self.assertIn("first submit", self.applicant.send.call_args.args[0])
+
+    async def test_permission_error_partway_through_post_gives_retry_hint(self):
+        self.fail_send_once(2, discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "Missing Access"))
+        self.long_answer_handler()
+        await subject.on_message(self.message("submit"))
+        self.assertIsNone(self.store.for_applicant(42, 1001)[0].message_id)
+        self.assertIn("post in your application channel", self.applicant.send.call_args.args[0])
+
+    async def test_branch_database_gains_publication_progress_column(self):
+        path = self.db_path.with_name("branch.sqlite3")
+        with sqlite3.connect(path) as connection:
+            connection.execute("CREATE TABLE applications (guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, "
+                               "applicant_id INTEGER NOT NULL, message_id INTEGER, PRIMARY KEY (guild_id, channel_id))")
+            connection.execute("""
+                CREATE TABLE application_workflows (
+                    guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, applicant_id INTEGER NOT NULL,
+                    questions TEXT NOT NULL DEFAULT '[]', answers TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL DEFAULT 'pending', reviewer_id INTEGER, decision_note TEXT,
+                    decided_at REAL, delete_after INTEGER, delete_at REAL,
+                    approval_role_ids TEXT NOT NULL DEFAULT '[]', PRIMARY KEY (guild_id, channel_id)
+                )
+            """)
+            connection.execute("INSERT INTO applications VALUES (42, 2000, 1001, 5000)")
+            connection.execute("INSERT INTO application_workflows (guild_id, channel_id, applicant_id, answers) "
+                               "VALUES (42, 2000, 1001, '[\"Saved answer\"]')")
+        connection.close()
+        store = ApplicationStore(path)
+        self.addCleanup(store.close)
+        workflow = store.workflow(ApplicationRecord(42, 2000, 1001, 5000))
+        self.assertEqual(workflow["published_message_ids"], [])
+        self.assertEqual(workflow["answers"], ["Saved answer"])
 
 
 if __name__ == "__main__":

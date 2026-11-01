@@ -176,15 +176,53 @@ async def prepare_application_decision(interaction):
         return None
 
 def answer_embeds(question_list, answers, title, footer=""):
-    """Keep each message below Discord's limits without dropping later answers."""
+    """Keep each message below Discord's limits without dropping later answers.
+
+    Boundaries depend only on questions and answers, so a resumed post splits identically."""
     embeds = [discord.Embed(title=title, color=discord.Color.blue())]
     embeds[0].set_footer(text=footer)
+    size = 0
     for index, answer in enumerate(answers):
         name = f"Q{index + 1}: {question_list[index]}"[:256]
-        if len(embeds[-1]) + len(name) + len(answer) > 5500 or len(embeds[-1].fields) >= 20:
+        if size + len(name) + len(answer) > 5500 or len(embeds[-1].fields) >= 20:
             embeds.append(discord.Embed(title="Application answers (continued)", color=discord.Color.blue()))
+            size = 0
         embeds[-1].add_field(name=name, value=answer, inline=False)
+        size += len(name) + len(answer)
     return embeds
+
+
+async def publish_application(channel, record, applicant):
+    """Post every part not yet recorded, then mark the application submitted."""
+    store = get_application_store()
+    workflow = store.workflow(record)
+    published = workflow["published_message_ids"]
+    embeds = answer_embeds(
+        workflow["questions"], workflow["answers"], f"New Application from {applicant.display_name}",
+        f"Application submitted by {applicant} ({applicant.id})"
+    )
+    embeds[0].add_field(name="Discord ID", value=str(applicant.id), inline=False)
+    # A crash between a send and its commit can repeat that one part, but never skips one.
+    for index in range(len(published), len(embeds)):
+        if index == 0:
+            message = await channel.send(content=f"{applicant.mention} <@&616354080704430130>", embed=embeds[0])
+        else:
+            message = await channel.send(embed=embeds[index])
+        store.record_published(record, message.id)
+        published.append(message.id)
+    store.mark_submitted(record, published[0])
+
+
+async def resume_publication(channel, applicant):
+    """Finish posting an incomplete application in its existing channel."""
+    store = get_application_store()
+    record = store.get(channel.guild.id, channel.id)
+    # Rows migrated from before publication tracking have no saved snapshot.
+    if (record is None or record.applicant_id != applicant.id or record.message_id is not None
+            or not store.workflow(record)["answers"]):
+        return False
+    await publish_application(channel, record, applicant)
+    return True
 
 
 class ApplicationHandler:
@@ -477,9 +515,18 @@ class ApplicationHandler:
                 or len(self.answers) != len(self.questions)):
             return
         self.state = "finalizing"
+        incomplete = None
         try:
             existing_channel = await existing_application_channel(self.guild, self.user.id)
             if existing_channel is not None:
+                incomplete = get_application_store().get(self.guild.id, existing_channel.id)
+                if await resume_publication(existing_channel, self.user):
+                    await self._announce_submission(existing_channel)
+                    # The snapshot saved with the channel is authoritative; later draft edits are not posted.
+                    if get_application_store().workflow(incomplete)["answers"] != self.answers:
+                        await self.user.send("Your channel shows the answers from your first submit. "
+                                             "Post any later changes there for the officers.")
+                    return
                 await self.user.send(f"You already have an application channel: {existing_channel.mention}")
                 return
             # INTERVIEW_CATEGORY_ID is guaranteed to be non-None due to startup validation
@@ -544,41 +591,42 @@ class ApplicationHandler:
             record = ApplicationRecord(self.guild.id, interview_channel.id, self.user.id)
             # Retain the identity even if publishing the embed or sending the DM fails.
             store.record_created(record, reservation, self.questions, self.answers)
-            
-            embeds = answer_embeds(
-                self.questions, self.answers, f"New Application from {self.user.display_name}",
-                f"Application submitted by {self.user} ({self.user.id})"
-            )
-            embeds[0].add_field(name="Discord ID", value=str(self.user.id), inline=False)
-            application_message = await interview_channel.send(
-                content=f"{self.user.mention} <@&616354080704430130>",
-                embed=embeds[0]
-            )
-            for embed in embeds[1:]:
-                await interview_channel.send(embed=embed)
-            get_application_store().mark_submitted(record, application_message.id)
-            self.state = "completed"
-            
-            # Notify user of completion
-            completion_embed = discord.Embed(
-                title="✅ Application Submitted Successfully!",
-                description=f"Your WoW: Forever guild application has been submitted and is awaiting officer review.\n\nYour application channel: {interview_channel.mention}",
-                color=discord.Color.green()
-            )
-            await self.user.send(embed=completion_embed)
-            
-            logger.info(f"Application completed for {self.user.display_name} ({self.user.id})")
-            
+            incomplete = record
+            await publish_application(interview_channel, record, self.user)
+            await self._announce_submission(interview_channel)
+
         except discord.Forbidden:
-            await self.user.send("❌ I don't have permission to create channels. Please contact an administrator.")
+            if self._posting_stalled(incomplete):
+                await self.user.send("❌ I don't have permission to post in your application channel. "
+                                     "Please contact an administrator, then type **submit** or click Apply again.")
+            else:
+                await self.user.send("❌ I don't have permission to create channels. Please contact an administrator.")
             logger.error(f"Permission denied when creating application channel for {self.user.display_name}")
         except Exception as e:
-            await self.user.send("❌ There was an error processing your application. Please contact an administrator.")
+            if self._posting_stalled(incomplete):
+                await self.user.send("❌ Your application channel was created, but not every answer was posted. "
+                                     "Type **submit** or click Apply again to finish posting it.")
+            else:
+                await self.user.send("❌ There was an error processing your application. Please contact an administrator.")
             logger.error(f"Error completing application for {self.user.display_name}: {e}")
         finally:
             if self.state == "finalizing":
                 self.state = "failed"
             self.release()
+
+    def _posting_stalled(self, record):
+        """The channel exists but some parts are unposted, so a retry can finish it."""
+        return record is not None and record.message_id is None and self.state == "finalizing"
+
+    async def _announce_submission(self, channel):
+        self.state = "completed"
+        completion_embed = discord.Embed(
+            title="✅ Application Submitted Successfully!",
+            description=f"Your WoW: Forever guild application has been submitted and is awaiting officer review.\n\nYour application channel: {channel.mention}",
+            color=discord.Color.green()
+        )
+        await self.user.send(embed=completion_embed)
+        logger.info(f"Application completed for {self.user.display_name} ({self.user.id})")
 
 class ApplicationView(discord.ui.View):
     def __init__(self):
@@ -608,6 +656,11 @@ class ApplicationView(discord.ui.View):
             await interaction.response.defer(ephemeral=True, thinking=True)
             existing_channel = await existing_application_channel(guild, user.id)
             if existing_channel is not None:
+                if await resume_publication(existing_channel, user):
+                    await interaction.followup.send(
+                        f"✅ Your application has been posted in {existing_channel.mention}.", ephemeral=True
+                    )
+                    return
                 await interaction.followup.send(
                     f"You already have an application channel: {existing_channel.mention}", ephemeral=True
                 )
