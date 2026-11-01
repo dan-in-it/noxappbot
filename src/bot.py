@@ -3,7 +3,8 @@ from discord.ext import commands
 import os
 import logging
 import asyncio
-from datetime import datetime, timedelta, timezone
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from dotenv import load_dotenv
 from application_store import ApplicationRecord, ApplicationStore
@@ -23,6 +24,16 @@ OFFICER_ROLE_ID = os.getenv("OFFICER_ROLE_ID")
 ADMIN_ROLE_ID = os.getenv("ADMIN_ROLE_ID")
 APPLICATION_CHANNEL_PREFIX = os.getenv("APPLICATION_CHANNEL_PREFIX", "application")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+APPROVAL_ROLE_IDS = tuple(int(value.strip()) for value in os.getenv(
+    "APPROVAL_ROLE_IDS", "616354179522363400,1548423178794307745"
+).split(",") if value.strip())
+if not APPROVAL_ROLE_IDS:
+    raise RuntimeError("APPROVAL_ROLE_IDS must contain at least one role ID")
+ONBOARDING_LINKS = {
+    "Guild rules": os.getenv("WELCOME_RULES_URL", ""),
+    "Raid schedule": os.getenv("WELCOME_SCHEDULE_URL", ""),
+    "Introductions": os.getenv("WELCOME_INTRODUCTIONS_URL", ""),
+}
 
 # Validate required environment variables
 if TOKEN is None or INTERVIEW_CATEGORY_ID is None:
@@ -38,14 +49,14 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 questions = [
-    "Which raid team are you applying to? TBC Team, Floater/Casual (TBC), 10M Weasals Weekday Team (MoP), 10M Cumby Team (MoP)",
-    "Have you reviewed the raid schedule for the team you're applying for?",
-    "How did you hear about us?",
-    "Is there a certain class/spec/role that you prefer to play?",
-    "Please provide a link to your Warcraft Logs page for the character(s) you're applying with",
-    "Do you currently have any friends or family in the guild? If so, who?",
-    "Tell us about yourself and your raiding experience",
-    "Any additional comments/questions?",
+    "What is your full WoW: Forever character name (or planned name)?",
+    "What class, preferred spec, and role do you plan to play? Include any alts you plan to play.",
+    "Are you interested in raiding, dungeons, PvP, or social/casual play? What are you looking for in our guild?",
+    "What is your timezone, and which days and times are you usually available? If you want to raid, what schedule can you commit to?",
+    "Have you read our guild rules and any posted raid schedule? Are there any expectations or scheduling conflicts you would like to discuss?",
+    "Tell us about yourself and your WoW experience. Warcraft Logs or other relevant links are optional; it is fine if you do not have logs.",
+    "How did you hear about us, and do you have any friends or family in the guild? If so, who?",
+    "Any additional comments or questions? You can answer 'none'.",
 ]
 
 # Store ongoing applications
@@ -53,6 +64,8 @@ ongoing_applications = {}
 _application_store = None
 _registry_ready = set()
 _registry_locks = {}
+_decision_locks = {}
+_deletion_tasks = {}
 
 
 class ApplicationRegistryError(Exception):
@@ -162,6 +175,56 @@ async def prepare_application_decision(interaction):
         )
         return None
 
+def answer_embeds(question_list, answers, title, footer=""):
+    """Keep each message below Discord's limits without dropping later answers.
+
+    Boundaries depend only on questions and answers, so a resumed post splits identically."""
+    embeds = [discord.Embed(title=title, color=discord.Color.blue())]
+    embeds[0].set_footer(text=footer)
+    size = 0
+    for index, answer in enumerate(answers):
+        name = f"Q{index + 1}: {question_list[index]}"[:256]
+        if size + len(name) + len(answer) > 5500 or len(embeds[-1].fields) >= 20:
+            embeds.append(discord.Embed(title="Application answers (continued)", color=discord.Color.blue()))
+            size = 0
+        embeds[-1].add_field(name=name, value=answer, inline=False)
+        size += len(name) + len(answer)
+    return embeds
+
+
+async def publish_application(channel, record, applicant):
+    """Post every part not yet recorded, then mark the application submitted."""
+    store = get_application_store()
+    workflow = store.workflow(record)
+    published = workflow["published_message_ids"]
+    embeds = answer_embeds(
+        workflow["questions"], workflow["answers"], f"New Application from {applicant.display_name}",
+        f"Application submitted by {applicant} ({applicant.id})"
+    )
+    embeds[0].add_field(name="Discord ID", value=str(applicant.id), inline=False)
+    # A crash between a send and its commit can repeat that one part, but never skips one.
+    for index in range(len(published), len(embeds)):
+        if index == 0:
+            message = await channel.send(content=f"{applicant.mention} <@&616354080704430130>", embed=embeds[0])
+        else:
+            message = await channel.send(embed=embeds[index])
+        store.record_published(record, message.id)
+        published.append(message.id)
+    store.mark_submitted(record, published[0])
+
+
+async def resume_publication(channel, applicant):
+    """Finish posting an incomplete application in its existing channel."""
+    store = get_application_store()
+    record = store.get(channel.guild.id, channel.id)
+    # Rows migrated from before publication tracking have no saved snapshot.
+    if (record is None or record.applicant_id != applicant.id or record.message_id is not None
+            or not store.workflow(record)["answers"]):
+        return False
+    await publish_application(channel, record, applicant)
+    return True
+
+
 class ApplicationHandler:
     def __init__(self, user, guild):
         self.user = user
@@ -170,6 +233,27 @@ class ApplicationHandler:
         self.current_question = 0
         self.lock = asyncio.Lock()
         self.state = "starting"
+        self.questions = list(questions)
+        self.editing = False
+        self.pending_long_answer = None
+
+    def snapshot(self):
+        return {
+            "questions": self.questions, "answers": list(self.answers),
+            "current_question": self.current_question, "state": self.state,
+            "editing": self.editing, "pending_long_answer": self.pending_long_answer,
+        }
+
+    def restore(self, draft):
+        self.questions = list(draft["questions"])
+        self.answers = list(draft["answers"])
+        self.current_question = draft["current_question"]
+        self.state = draft["state"]
+        self.editing = draft["editing"]
+        self.pending_long_answer = draft["pending_long_answer"]
+
+    def save_progress(self):
+        get_application_store().save_draft(self.guild.id, self.user.id, self.snapshot())
 
     def is_current(self):
         return ongoing_applications.get(self.user.id) is self
@@ -181,10 +265,12 @@ class ApplicationHandler:
     async def start_application(self):
         """Start the application process by sending the first question"""
         async with self.lock:
-            if not self.is_current() or self.state != "starting":
+            if not self.is_current() or self.state not in ("starting", "active", "review"):
                 return False
-            self.state = "active"
+            if self.state == "starting":
+                self.state = "active"
             try:
+                self.save_progress()
                 await self.send_current_question()
             except discord.Forbidden:
                 self.state = "failed"
@@ -199,40 +285,107 @@ class ApplicationHandler:
     
     async def send_current_question(self):
         """Send the current question to the user"""
-        if self.current_question < len(questions):
+        if self.state == "review":
+            await self.send_review()
+        elif self.current_question < len(self.questions):
             question_num = self.current_question + 1
-            question = questions[self.current_question]
+            question = self.questions[self.current_question]
             
             embed = discord.Embed(
-                title=f"Guild Application - Question {question_num}/{len(questions)}",
+                title=f"WoW: Forever Application - Question {question_num}/{len(self.questions)}",
                 description=question,
                 color=discord.Color.blue()
             )
-            embed.set_footer(text="Please respond with your answer. Type 'cancel' to cancel the application.")
+            if self.editing and self.current_question < len(self.answers):
+                embed.add_field(name="Current answer", value=self.answers[self.current_question], inline=False)
+            embed.set_footer(text="Answer in one message (up to 800 characters). Commands: back, edit N, review, resume, cancel.")
             
             await self.user.send(embed=embed)
         else:
-            await self._complete_application()
+            await self.send_review()
+
+    async def send_review(self):
+        for embed in answer_embeds(self.questions, self.answers, "Review your WoW: Forever application"):
+            await self.user.send(embed=embed)
+        if len(self.answers) == len(self.questions):
+            await self.user.send("Check your answers, then type **submit** to send them to the officers. "
+                                 "Use **edit N** (for example, `edit 3`), **back**, or **cancel**. Your progress is saved.")
+        else:
+            await self.user.send(f"{len(self.answers)}/{len(self.questions)} answers saved. "
+                                 "Use **edit N**, or **resume** to see your next question.")
     
     async def process_answer(self, message):
         """Process the user's answer and move to next question"""
         async with self.lock:
-            if not self.is_current() or self.state != "active":
+            if not self.is_current() or self.state not in ("active", "review"):
                 return
-            await self._process_answer(message)
+            previous = self.snapshot()
+            try:
+                await self._process_answer(message)
+            except Exception:
+                logger.exception("Could not advance application for %s", self.user.id)
+                try:
+                    saved = get_application_store().get_draft(self.user.id)
+                except Exception:
+                    saved = None
+                self.restore(saved or previous)
+                try:
+                    await self.user.send("I couldn't continue the application. Your last saved progress is retained. "
+                                         "Type **resume** to check it and try again.")
+                except discord.HTTPException:
+                    logger.warning("Could not deliver draft recovery message to %s", self.user.id)
 
     async def _process_answer(self, message):
-        if message.content.lower() == 'cancel':
+        command = message.content.strip().lower()
+        if command == 'cancel':
             await self._cancel_application()
+            return
+
+        if command == 'resume':
+            await self.send_current_question()
+            return
+        if command == 'review':
+            self.editing = False
+            self.pending_long_answer = None
+            self.current_question = len(self.answers)
+            self.state = "review" if len(self.answers) == len(self.questions) else "active"
+            self.save_progress()
+            await self.send_review()
+            return
+        if command == 'back' or command == 'edit' or command.startswith('edit '):
+            try:
+                target = self.current_question - 1 if command == 'back' else int(command.split()[1]) - 1
+                if not 0 <= target < len(self.answers):
+                    raise ValueError
+            except (ValueError, IndexError):
+                await self.user.send("Use **edit N** for a question you have already answered. "
+                                     "**back** goes to the previous answer.")
+                return
+            self.current_question, self.editing, self.state = target, True, "active"
+            self.pending_long_answer = None
+            self.save_progress()
+            await self.send_current_question()
+            return
+        if command == 'submit':
+            if self.state != "review" or len(self.answers) != len(self.questions):
+                await self.user.send("Please finish your answers and type **review** before submitting.")
+                return
+            await self._complete_application()
+            return
+        if self.state == "review":
+            await self.user.send("Your answers are saved. Type **submit**, **edit N**, **back**, or **cancel**.")
             return
         
         # Handle "proceed" command for long answers
-        if message.content.lower() == 'proceed' and hasattr(self, 'pending_long_answer'):
+        if command == 'proceed' and self.pending_long_answer is not None:
             answer = self.validate_and_truncate_answer(self.pending_long_answer)
-            delattr(self, 'pending_long_answer')
+            self.pending_long_answer = None
         else:
             # Remove excessive whitespace
             clean_content = ' '.join(message.content.split())
+            if not clean_content:
+                await self.user.send("Please send a text answer, or 'none' for an optional question.")
+                return
             
             # Check if answer is too long
             if len(clean_content) > 800:
@@ -247,10 +400,10 @@ class ApplicationHandler:
                     inline=False
                 )
                 embed.set_footer(text="If you choose to proceed, your answer will be cut off at 800 characters.")
-                await self.user.send(embed=embed)
-                
                 # Store the long answer for potential truncation
                 self.pending_long_answer = clean_content
+                self.save_progress()
+                await self.user.send(embed=embed)
                 return
             
             answer = clean_content
@@ -267,13 +420,16 @@ class ApplicationHandler:
             return
         
         # Store the processed answer
-        self.answers.append(answer)
-        self.current_question += 1
-        
-        if self.current_question < len(questions):
-            await self.send_current_question()
+        self.pending_long_answer = None
+        if self.current_question < len(self.answers):
+            self.answers[self.current_question] = answer
         else:
-            await self._complete_application()
+            self.answers.append(answer)
+        self.current_question = len(self.answers)
+        self.editing = False
+        self.state = "review" if len(self.answers) == len(self.questions) else "active"
+        self.save_progress()
+        await self.send_current_question()
     
     def validate_and_truncate_answer(self, content):
         """Validate and truncate answer to prevent Discord limits"""
@@ -335,10 +491,11 @@ class ApplicationHandler:
     async def cancel_application(self):
         """Cancel the application process"""
         async with self.lock:
-            if self.is_current() and self.state == "active":
+            if self.is_current() and self.state in ("active", "review"):
                 await self._cancel_application()
 
     async def _cancel_application(self):
+        get_application_store().delete_draft(self.guild.id, self.user.id)
         self.state = "cancelled"
         self.release()
         embed = discord.Embed(
@@ -354,12 +511,22 @@ class ApplicationHandler:
             await self._complete_application()
 
     async def _complete_application(self):
-        if not self.is_current() or self.state != "active":
+        if (not self.is_current() or self.state != "review"
+                or len(self.answers) != len(self.questions)):
             return
         self.state = "finalizing"
+        incomplete = None
         try:
             existing_channel = await existing_application_channel(self.guild, self.user.id)
             if existing_channel is not None:
+                incomplete = get_application_store().get(self.guild.id, existing_channel.id)
+                if await resume_publication(existing_channel, self.user):
+                    await self._announce_submission(existing_channel)
+                    # The snapshot saved with the channel is authoritative; later draft edits are not posted.
+                    if get_application_store().workflow(incomplete)["answers"] != self.answers:
+                        await self.user.send("Your channel shows the answers from your first submit. "
+                                             "Post any later changes there for the officers.")
+                    return
                 await self.user.send(f"You already have an application channel: {existing_channel.mention}")
                 return
             # INTERVIEW_CATEGORY_ID is guaranteed to be non-None due to startup validation
@@ -423,75 +590,43 @@ class ApplicationHandler:
                 raise
             record = ApplicationRecord(self.guild.id, interview_channel.id, self.user.id)
             # Retain the identity even if publishing the embed or sending the DM fails.
-            store.record_created(record, reservation)
-            
-            # Create and send application embed with safety checks
-            embed = discord.Embed(
-                title=f"New Application from {self.user.display_name}",
-                color=discord.Color.blue(),
-            )
-            
-            # Add questions and answers with additional safety checks
-            total_embed_length = len(embed.title or "") + len(embed.description or "")
-            
-            for i, question in enumerate(questions):
-                # Ensure field name doesn't exceed Discord's 256 character limit
-                field_name = f"Q{i+1}: {question}"
-                if len(field_name) > 256:
-                    field_name = field_name[:253] + "..."
-                
-                # Ensure field value doesn't exceed Discord's 1024 character limit
-                field_value = self.answers[i]
-                if len(field_value) > 1024:
-                    field_value = field_value[:1021] + "..."
-                
-                # Check if adding this field would exceed the total embed limit (6000 chars)
-                field_length = len(field_name) + len(field_value)
-                if total_embed_length + field_length > 5500:  # Leave some buffer
-                    # Add a truncation notice instead
-                    embed.add_field(
-                        name="⚠️ Application Truncated",
-                        value="Some answers were too long and have been truncated. Full responses are available in the application logs.",
-                        inline=False
-                    )
-                    break
-                
-                embed.add_field(name=field_name, value=field_value, inline=False)
-                total_embed_length += field_length
-            
-            # Add Discord ID as a field for easy extraction
-            embed.add_field(name="Discord ID", value=str(self.user.id), inline=False)
-            
-            embed.set_footer(text=f"Application submitted by {self.user} ({self.user.id})")
-            
-            # Send the embed with mentions
-            application_message = await interview_channel.send(
-                content=f"{self.user.mention} <@&616354080704430130>",
-                embed=embed
-            )
-            get_application_store().mark_submitted(record, application_message.id)
-            self.state = "completed"
-            
-            # Notify user of completion
-            completion_embed = discord.Embed(
-                title="✅ Application Submitted Successfully!",
-                description=f"Your guild application has been submitted and reviewed by our officers.\n\nYour application channel: {interview_channel.mention}",
-                color=discord.Color.green()
-            )
-            await self.user.send(embed=completion_embed)
-            
-            logger.info(f"Application completed for {self.user.display_name} ({self.user.id})")
-            
+            store.record_created(record, reservation, self.questions, self.answers)
+            incomplete = record
+            await publish_application(interview_channel, record, self.user)
+            await self._announce_submission(interview_channel)
+
         except discord.Forbidden:
-            await self.user.send("❌ I don't have permission to create channels. Please contact an administrator.")
+            if self._posting_stalled(incomplete):
+                await self.user.send("❌ I don't have permission to post in your application channel. "
+                                     "Please contact an administrator, then type **submit** or click Apply again.")
+            else:
+                await self.user.send("❌ I don't have permission to create channels. Please contact an administrator.")
             logger.error(f"Permission denied when creating application channel for {self.user.display_name}")
         except Exception as e:
-            await self.user.send("❌ There was an error processing your application. Please contact an administrator.")
+            if self._posting_stalled(incomplete):
+                await self.user.send("❌ Your application channel was created, but not every answer was posted. "
+                                     "Type **submit** or click Apply again to finish posting it.")
+            else:
+                await self.user.send("❌ There was an error processing your application. Please contact an administrator.")
             logger.error(f"Error completing application for {self.user.display_name}: {e}")
         finally:
             if self.state == "finalizing":
                 self.state = "failed"
             self.release()
+
+    def _posting_stalled(self, record):
+        """The channel exists but some parts are unposted, so a retry can finish it."""
+        return record is not None and record.message_id is None and self.state == "finalizing"
+
+    async def _announce_submission(self, channel):
+        self.state = "completed"
+        completion_embed = discord.Embed(
+            title="✅ Application Submitted Successfully!",
+            description=f"Your WoW: Forever guild application has been submitted and is awaiting officer review.\n\nYour application channel: {channel.mention}",
+            color=discord.Color.green()
+        )
+        await self.user.send(embed=completion_embed)
+        logger.info(f"Application completed for {self.user.display_name} ({self.user.id})")
 
 class ApplicationView(discord.ui.View):
     def __init__(self):
@@ -509,7 +644,7 @@ class ApplicationView(discord.ui.View):
         # Check if user already has an ongoing application
         if user.id in ongoing_applications:
             await interaction.response.send_message(
-                "You already have an application in progress. Please check your DMs to continue, or type 'cancel' to start over.",
+                "You already have an application in progress. Type 'resume' in your DMs to continue, or 'cancel' to start over.",
                 ephemeral=True
             )
             return
@@ -521,14 +656,24 @@ class ApplicationView(discord.ui.View):
             await interaction.response.defer(ephemeral=True, thinking=True)
             existing_channel = await existing_application_channel(guild, user.id)
             if existing_channel is not None:
+                if await resume_publication(existing_channel, user):
+                    await interaction.followup.send(
+                        f"✅ Your application has been posted in {existing_channel.mention}.", ephemeral=True
+                    )
+                    return
                 await interaction.followup.send(
                     f"You already have an application channel: {existing_channel.mention}", ephemeral=True
                 )
                 return
+            draft = get_application_store().get_draft(user.id)
+            if draft is not None:
+                if draft["guild_id"] != guild.id:
+                    raise ApplicationRegistryError("A saved application belongs to a different server")
+                application_handler.restore(draft)
             success = await application_handler.start_application()
             if success:
                 await interaction.followup.send(
-                    "✅ Application started! Please check your DMs to continue with the questions.", ephemeral=True
+                    "✅ Your application is ready in your DMs. Saved progress has been restored if available.", ephemeral=True
                 )
             else:
                 await interaction.followup.send(
@@ -540,7 +685,7 @@ class ApplicationView(discord.ui.View):
                 "❌ I couldn't verify your application status. Please contact an administrator.", ephemeral=True
             )
         finally:
-            if application_handler.state not in ("active", "finalizing"):
+            if application_handler.state not in ("active", "review", "finalizing"):
                 application_handler.release()
 
 def parse_time_string(time_str):
@@ -588,8 +733,15 @@ def format_time_duration(seconds):
 async def schedule_channel_deletion(guild, record, delay_seconds):
     """Schedule a channel for deletion after a specified delay in seconds"""
     try:
+        deadline = get_application_store().workflow(record)["delete_at"]
+        if deadline is None:
+            return
         await asyncio.sleep(delay_seconds)
         channel, _ = await verified_application_channel(guild, record.channel_id, expected=record)
+        workflow = get_application_store().workflow(record)
+        if (workflow["delete_at"] != deadline or deadline > time.time()
+                or workflow["status"] not in ("approved", "rejected")):
+            return
         await channel.delete(reason="Application processed - automatic cleanup")
         get_application_store().remove(record)
         logger.info(f"Deleted application channel: {channel.name}")
@@ -602,12 +754,37 @@ async def schedule_channel_deletion(guild, record, delay_seconds):
     except Exception as e:
         logger.error(f"Error deleting channel: {e}")
 
+
+def queue_channel_deletion(guild, record):
+    workflow = get_application_store().workflow(record)
+    if workflow["delete_at"] is None or workflow["status"] not in ("approved", "rejected"):
+        return
+    key = (guild.id, record.channel_id)
+    existing = _deletion_tasks.get(key)
+    if existing is not None and not existing.done():
+        return
+    task = asyncio.create_task(schedule_channel_deletion(
+        guild, record, max(0, workflow["delete_at"] - time.time())
+    ))
+    _deletion_tasks[key] = task
+
+    def finished(completed):
+        if _deletion_tasks.get(key) is completed:
+            _deletion_tasks.pop(key, None)
+
+    task.add_done_callback(finished)
+
+
+def restore_cleanup_tasks(guild):
+    for record in get_application_store().scheduled_deletions(guild.id):
+        queue_channel_deletion(guild, record)
+
 @bot.tree.command(name="noxpost", description="Post the guild application button (Admin only)")
 @discord.app_commands.default_permissions(administrator=True)
 async def post_application(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="🏰 Guild Application",
-        description="Ready to join our guild? Click the button below to start your application!\n\n📝 Fill out the application form\n⏱️ Takes about 5 minutes to complete\n🔒 Your responses will be reviewed privately",
+        title="🏰 WoW: Forever Guild Application",
+        description=f"Ready to join our WoW: Forever guild? Click below to start or resume your application!\n\n📝 Answer {len(questions)} questions in DMs, then review and submit\n⏱️ Takes about 5 minutes; progress is saved\n🔒 Your responses are shared with the review team in your private application channel",
         color=discord.Color.blue()
     )
     
@@ -630,335 +807,170 @@ async def sync_commands(interaction: discord.Interaction):
         )
         logger.error(f"Manual sync failed: {e}")
 
+class RoleAssignmentError(Exception):
+    pass
+
+
+async def grant_approval_roles(guild, applicant_id, role_ids):
+    # REST lookup works without the privileged member intent and avoids stale roles.
+    applicant = await guild.fetch_member(applicant_id)
+    roles = [guild.get_role(role_id) for role_id in role_ids]
+    missing_ids = [role_id for role_id, role in zip(role_ids, roles) if role is None]
+    if missing_ids:
+        raise RoleAssignmentError(f"Configured role IDs were not found: {', '.join(map(str, missing_ids))}.")
+    current_ids = {role.id for role in applicant.roles}
+    needed = [role for role in roles if role.id not in current_ids]
+    if needed:
+        if guild.me is None or not guild.me.guild_permissions.manage_roles:
+            raise RoleAssignmentError("The bot needs Manage Roles permission.")
+        if any(not role.is_assignable() for role in needed):
+            raise RoleAssignmentError("Both roles must be below the bot's highest role and must not be managed roles.")
+        # Atomic role additions preserve unrelated roles and can safely be retried
+        # after a partial failure or a crash between Discord and the SQLite commit.
+        await applicant.add_roles(*needed, reason="WoW: Forever application approved", atomic=True)
+    return applicant
+
+
+def onboarding_text():
+    lines = ["Your Discord membership roles have been granted."]
+    lines.extend(f"[{label}]({url})" for label, url in ONBOARDING_LINKS.items() if url)
+    lines.append("Read the guild rules and schedule, then introduce yourself. "
+                 "Contact an officer for your in-game guild invitation.")
+    return "\n".join(lines)
+
+
+async def decide_application(interaction, approved, note, delete_time):
+    if not interaction.guild:
+        await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+        return
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("❌ This command can only be used by server members.", ephemeral=True)
+        return
+    user_roles = {role.id for role in interaction.user.roles}
+    staff_roles = {int(role_id) for role_id in (OFFICER_ROLE_ID, ADMIN_ROLE_ID) if role_id}
+    if not interaction.user.guild_permissions.administrator and not user_roles.intersection(staff_roles):
+        await interaction.response.send_message(
+            "❌ Only officers and administrators can process applications.", ephemeral=True)
+        return
+    if not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This command can only be used in text channels.", ephemeral=True)
+        return
+    delete_seconds = parse_time_string(delete_time) if delete_time is not None else None
+    if delete_time is not None and delete_seconds is None:
+        await interaction.response.send_message(
+            "❌ Invalid time format. Use '10m' or '1h'; maximum is 1 week (168h or 10080m).", ephemeral=True)
+        return
+    if not note.strip() or len(note) > 1000:
+        await interaction.response.send_message("❌ Please use a message between 1 and 1000 characters.", ephemeral=True)
+        return
+    verified = await prepare_application_decision(interaction)
+    if verified is None:
+        return
+    channel, record = verified
+    lock = _decision_locks.setdefault((record.guild_id, record.channel_id), asyncio.Lock())
+    async with lock:
+        try:
+            channel, record = await verified_application_channel(interaction.guild, record.channel_id, expected=record)
+            store = get_application_store()
+            workflow = store.workflow(record)
+            status = "approved" if approved else "rejected"
+            in_progress = "approving" if approved else "rejecting"
+            if workflow["status"] in ("approved", "rejected"):
+                await interaction.followup.send(
+                    f"This application was already {workflow['status']} by <@{workflow['reviewer_id']}>.",
+                    ephemeral=True)
+                return
+            if workflow["status"] not in ("pending", in_progress):
+                await interaction.followup.send(
+                    "A different decision is already in progress. Finish that operation before continuing.", ephemeral=True)
+                return
+            if workflow["status"] == "pending":
+                store.begin_decision(record, in_progress, interaction.user.id, note, delete_seconds,
+                                     APPROVAL_ROLE_IDS if approved else ())
+                workflow = store.workflow(record)
+            applicant = None
+            if approved:
+                try:
+                    applicant = await grant_approval_roles(
+                        interaction.guild, record.applicant_id, workflow["approval_role_ids"])
+                except (discord.HTTPException, RoleAssignmentError) as error:
+                    logger.warning("Approval roles incomplete for %s: %s", record.applicant_id, error)
+                    await interaction.followup.send(
+                        f"❌ Approval is pending: {error}\n"
+                        "Check that the applicant is still in the server, the bot has Manage Roles, and both roles "
+                        "are below its highest role. Then retry **/noxapprove**. Any roles already granted are kept; "
+                        "approval notifications and channel cleanup wait until both roles are granted.", ephemeral=True)
+                    return
+            workflow = store.finish_decision(record, status)
+        except Exception:
+            logger.exception("Could not persist application decision for channel %s", record.channel_id)
+            await interaction.followup.send(
+                "❌ The decision could not be completed. Saved progress is retained; retry the same command. "
+                "If approval roles were already granted, retrying will keep them.", ephemeral=True)
+            return
+
+        # A retry completes the original officer's saved decision, including its note
+        # and cleanup duration, rather than silently replacing the audit information.
+        color = discord.Color.green() if approved else discord.Color.red()
+        embed = discord.Embed(
+            title="✅ Application Approved" if approved else "❌ Application Rejected",
+            description=f"**Applicant:** <@{record.applicant_id}>\n**Reviewed by:** <@{workflow['reviewer_id']}>",
+            color=color, timestamp=datetime.fromtimestamp(workflow["decided_at"], timezone.utc)
+        )
+        embed.add_field(name="Welcome Message" if approved else "Reason", value=workflow["decision_note"], inline=False)
+        if workflow["delete_at"] is not None:
+            embed.add_field(name="Channel Deletion",
+                            value=f"Scheduled for <t:{int(workflow['delete_at'])}:F> (<t:{int(workflow['delete_at'])}:R>).",
+                            inline=False)
+        else:
+            embed.add_field(name="Channel Status", value="This channel will remain open for further discussion.", inline=False)
+        channel_status = "Review channel updated"
+        try:
+            await channel.send(embed=embed)
+        except Exception:
+            logger.exception("Could not post decision in channel %s", record.channel_id)
+            channel_status = "Decision saved, but the review channel notification failed"
+
+        dm_status = "❌ Failed to send DM"
+        try:
+            if applicant is None:
+                applicant = interaction.guild.get_member(record.applicant_id) or await bot.fetch_user(record.applicant_id)
+            dm_embed = discord.Embed(
+                title="🎉 Application Approved!" if approved else "Application Update",
+                description=f"Your WoW: Forever application to **{interaction.guild.name}** has been {status}.", color=color)
+            dm_embed.add_field(name="Welcome Message" if approved else "Reason", value=workflow["decision_note"], inline=False)
+            dm_embed.add_field(
+                name="What's Next?",
+                value=onboarding_text() if approved else "Contact an officer with questions or to discuss a future application.",
+                inline=False)
+            await applicant.send(embed=dm_embed)
+            dm_status = "✅ DM sent successfully"
+        except discord.Forbidden:
+            dm_status = "❌ DMs disabled or blocked"
+        except Exception:
+            logger.exception("Could not deliver application decision to %s", record.applicant_id)
+        finally:
+            queue_channel_deletion(interaction.guild, record)
+        await interaction.followup.send(
+            f"**Application {status}.** {channel_status}.\n**DM Notification Status:** {dm_status}", ephemeral=True)
+
+
 @bot.tree.command(name="noxreject", description="Reject an application")
-@discord.app_commands.describe(
-    reason="Reason for rejection (optional)",
-    delete_time="Time until channel deletion (e.g., '10m', '1h', '30m') - if not specified, channel stays"
-)
-async def reject_application(
-    interaction: discord.Interaction,
-    reason: str = "No reason provided",
-    delete_time: str | None = None
-):
-    # Ensure this is used in a guild
-    if not interaction.guild:
-        await interaction.response.send_message(
-            "❌ This command can only be used in a server.",
-            ephemeral=True
-        )
-        return
-    
-    # Ensure user is a Member (not just User)
-    if not isinstance(interaction.user, discord.Member):
-        await interaction.response.send_message(
-            "❌ This command can only be used by server members.",
-            ephemeral=True
-        )
-        return
-    
-    # Check if user has permission (officer or admin role)
-    user_roles = [role.id for role in interaction.user.roles]
-    has_permission = False
-    
-    if interaction.user.guild_permissions.administrator:
-        has_permission = True
-    elif OFFICER_ROLE_ID and int(OFFICER_ROLE_ID) in user_roles:
-        has_permission = True
-    elif ADMIN_ROLE_ID and int(ADMIN_ROLE_ID) in user_roles:
-        has_permission = True
-    
-    if not has_permission:
-        await interaction.response.send_message(
-            "❌ You don't have permission to reject applications. Only officers and administrators can use this command.",
-            ephemeral=True
-        )
-        return
-    
-    # Check if this is an application channel
-    channel = interaction.channel
-    if not isinstance(channel, discord.TextChannel):
-        await interaction.response.send_message(
-            "❌ This command can only be used in text channels.",
-            ephemeral=True
-        )
-        return
-    
-    # Parse and validate delete_time if provided
-    delete_seconds = None
-    if delete_time is not None:
-        delete_seconds = parse_time_string(delete_time)
-        if delete_seconds is None:
-            await interaction.response.send_message(
-                "❌ Invalid time format. Use formats like '10m' for minutes or '1h' for hours. Maximum is 1 week (168h or 10080m).",
-                ephemeral=True
-            )
-            return
-    
-    verified = await prepare_application_decision(interaction)
-    if verified is None:
-        return
-    channel, application_record = verified
-    applicant_name = f"<@{application_record.applicant_id}>"
-    
-    # Create rejection embed
-    rejection_embed = discord.Embed(
-        title="❌ Application Rejected",
-        description=f"**Applicant:** {applicant_name}\n**Reason:** {reason}\n**Rejected by:** {interaction.user.mention}",
-        color=discord.Color.red(),
-        timestamp=datetime.now(timezone.utc)
-    )
-    
-    if delete_seconds is not None:
-        deletion_time = datetime.now(timezone.utc) + timedelta(seconds=delete_seconds)
-        time_duration = format_time_duration(delete_seconds)
-        rejection_embed.add_field(
-            name="Channel Deletion",
-            value=f"This channel will be automatically deleted in {time_duration} (<t:{int(deletion_time.timestamp())}:R>)",
-            inline=False
-        )
-    else:
-        rejection_embed.add_field(
-            name="Channel Status",
-            value="This channel will remain open for further discussion.",
-            inline=False
-        )
-    
-    await channel.send(embed=rejection_embed)
-    
-    # Try to notify the applicant via DM
-    dm_status = "❌ Failed to send DM"
-    try:
-        applicant_id = application_record.applicant_id
-        # Try to get the applicant user object using the ID
-        applicant = None
-        try:
-            # First try to get from guild cache
-            applicant = interaction.guild.get_member(applicant_id)
-            if applicant:
-                logger.info(f"Found applicant in guild cache: {applicant.display_name} ({applicant.id})")
-            else:
-                # If not in cache, fetch directly from Discord API
-                logger.info(f"Member not in cache, fetching from Discord API...")
-                applicant = await bot.fetch_user(applicant_id)
-                logger.info(f"Fetched applicant from API: {applicant.display_name} ({applicant.id})")
-        except discord.NotFound:
-            logger.error(f"User with ID {applicant_id} not found on Discord")
-            dm_status = "❌ User not found on Discord"
-            applicant = None
-        except Exception as e:
-            logger.error(f"Error fetching user {applicant_id}: {e}")
-            dm_status = f"❌ Error fetching user: {str(e)}"
-            applicant = None
-        
-        if applicant:
-            dm_embed = discord.Embed(
-                title="Application Update",
-                description=f"Your application to **{interaction.guild.name}** has been reviewed.",
-                color=discord.Color.red()
-            )
-            dm_embed.add_field(name="Status", value="❌ Rejected", inline=True)
-            dm_embed.add_field(name="Reason", value=reason, inline=False)
-            dm_embed.add_field(
-                name="What's Next?",
-                value="You're welcome to apply again in the future. Feel free to reach out to our officers if you have any questions.",
-                inline=False
-            )
+@discord.app_commands.describe(reason="Reason for rejection (optional)",
+                               delete_time="Time until channel deletion (e.g., '10m', '1h'); omit to keep it")
+async def reject_application(interaction: discord.Interaction, reason: str = "No reason provided",
+                             delete_time: str | None = None):
+    await decide_application(interaction, False, reason, delete_time)
 
-            await applicant.send(embed=dm_embed)
-            logger.info(f"Successfully sent rejection notification to {applicant.display_name}")
-            dm_status = "✅ DM sent successfully"
-        
-    except discord.Forbidden:
-        logger.warning(f"Could not send DM to applicant - DMs may be disabled")
-        dm_status = "❌ DMs disabled or blocked"
-    except Exception as e:
-        logger.error(f"Error sending rejection DM: {e}")
-        dm_status = f"❌ Error: {str(e)}"
-    
-    # Send a follow-up message to the officer about DM status
-    try:
-        await interaction.followup.send(
-            f"**DM Notification Status:** {dm_status}",
-            ephemeral=True
-        )
-    except Exception as e:
-        logger.error(f"Could not send DM status follow-up: {e}")
-    
-    # Schedule channel deletion if requested
-    if delete_seconds is not None:
-        asyncio.create_task(schedule_channel_deletion(interaction.guild, application_record, delete_seconds))
-        time_duration = format_time_duration(delete_seconds)
-        logger.info(f"Application rejected by {interaction.user.display_name} in {channel.name}. Channel scheduled for deletion in {time_duration}.")
-    else:
-        logger.info(f"Application rejected by {interaction.user.display_name} in {channel.name}. Channel will remain open.")
 
-@bot.tree.command(name="noxapprove", description="Approve an application")
-@discord.app_commands.describe(
-    welcome_message="Custom welcome message (optional)",
-    delete_time="Time until channel deletion (e.g., '10m', '1h', '30m') - if not specified, channel stays"
-)
-async def approve_application(
-    interaction: discord.Interaction,
-    welcome_message: str = "Welcome to the guild! We're excited to have you join us.",
-    delete_time: str | None = None
-):
-    # Ensure this is used in a guild
-    if not interaction.guild:
-        await interaction.response.send_message(
-            "❌ This command can only be used in a server.",
-            ephemeral=True
-        )
-        return
-    
-    # Ensure user is a Member (not just User)
-    if not isinstance(interaction.user, discord.Member):
-        await interaction.response.send_message(
-            "❌ This command can only be used by server members.",
-            ephemeral=True
-        )
-        return
-    
-    # Check if user has permission (officer or admin role)
-    user_roles = [role.id for role in interaction.user.roles]
-    has_permission = False
-    
-    if interaction.user.guild_permissions.administrator:
-        has_permission = True
-    elif OFFICER_ROLE_ID and int(OFFICER_ROLE_ID) in user_roles:
-        has_permission = True
-    elif ADMIN_ROLE_ID and int(ADMIN_ROLE_ID) in user_roles:
-        has_permission = True
-    
-    if not has_permission:
-        await interaction.response.send_message(
-            "❌ You don't have permission to accept applications. Only officers and administrators can use this command.",
-            ephemeral=True
-        )
-        return
-    
-    # Check if this is an application channel
-    channel = interaction.channel
-    if not isinstance(channel, discord.TextChannel):
-        await interaction.response.send_message(
-            "❌ This command can only be used in text channels.",
-            ephemeral=True
-        )
-        return
-    
-    # Parse and validate delete_time if provided
-    delete_seconds = None
-    if delete_time is not None:
-        delete_seconds = parse_time_string(delete_time)
-        if delete_seconds is None:
-            await interaction.response.send_message(
-                "❌ Invalid time format. Use formats like '10m' for minutes or '1h' for hours. Maximum is 1 week (168h or 10080m).",
-                ephemeral=True
-            )
-            return
-    
-    verified = await prepare_application_decision(interaction)
-    if verified is None:
-        return
-    channel, application_record = verified
-    applicant_name = f"<@{application_record.applicant_id}>"
-    
-    # Create acceptance embed
-    acceptance_embed = discord.Embed(
-        title="✅ Application Approved",
-        description=f"**Applicant:** {applicant_name}\n**Approved by:** {interaction.user.mention}",
-        color=discord.Color.green(),
-        timestamp=datetime.now(timezone.utc)
-    )
-    
-    acceptance_embed.add_field(
-        name="Welcome Message",
-        value=welcome_message,
-        inline=False
-    )
-    
-    if delete_seconds is not None:
-        deletion_time = datetime.now(timezone.utc) + timedelta(seconds=delete_seconds)
-        time_duration = format_time_duration(delete_seconds)
-        acceptance_embed.add_field(
-            name="Channel Deletion",
-            value=f"This channel will be automatically deleted in {time_duration} (<t:{int(deletion_time.timestamp())}:R>)",
-            inline=False
-        )
-    else:
-        acceptance_embed.add_field(
-            name="Channel Status",
-            value="This channel will remain open for further discussion.",
-            inline=False
-        )
-    
-    await channel.send(embed=acceptance_embed)
-    
-    # Try to notify the applicant via DM
-    dm_status = "❌ Failed to send DM"
-    try:
-        applicant_id = application_record.applicant_id
-        # Try to get the applicant user object using the ID
-        applicant = None
-        try:
-            # First try to get from guild cache
-            applicant = interaction.guild.get_member(applicant_id)
-            if applicant:
-                logger.info(f"Found applicant in guild cache: {applicant.display_name} ({applicant.id})")
-            else:
-                # If not in cache, fetch directly from Discord API
-                logger.info(f"Member not in cache, fetching from Discord API...")
-                applicant = await bot.fetch_user(applicant_id)
-                logger.info(f"Fetched applicant from API: {applicant.display_name} ({applicant.id})")
-        except discord.NotFound:
-            logger.error(f"User with ID {applicant_id} not found on Discord")
-            dm_status = "❌ User not found on Discord"
-            applicant = None
-        except Exception as e:
-            logger.error(f"Error fetching user {applicant_id}: {e}")
-            dm_status = f"❌ Error fetching user: {str(e)}"
-            applicant = None
-        
-        if applicant:
-            dm_embed = discord.Embed(
-                title="🎉 Application Approved!",
-                description=f"Congratulations! Your application to **{interaction.guild.name}** has been approved!",
-                color=discord.Color.green()
-            )
-            dm_embed.add_field(name="Status", value="✅ Approved", inline=True)
-            dm_embed.add_field(name="Welcome Message", value=welcome_message, inline=False)
-            dm_embed.add_field(
-                name="What's Next?",
-                value="You should now have access to the guild! Check out the guild channels and feel free to introduce yourself.",
-                inline=False
-            )
+@bot.tree.command(name="noxapprove", description="Approve an application and grant membership roles")
+@discord.app_commands.describe(welcome_message="Custom welcome message (optional)",
+                               delete_time="Time until channel deletion (e.g., '10m', '1h'); omit to keep it")
+async def approve_application(interaction: discord.Interaction,
+                              welcome_message: str = "Welcome to our WoW: Forever guild! We're excited to have you join us.",
+                              delete_time: str | None = None):
+    await decide_application(interaction, True, welcome_message, delete_time)
 
-            await applicant.send(embed=dm_embed)
-            logger.info(f"Successfully sent approval notification to {applicant.display_name}")
-            dm_status = "✅ DM sent successfully"
-        
-    except discord.Forbidden:
-        logger.warning(f"Could not send DM to applicant - DMs may be disabled")
-        dm_status = "❌ DMs disabled or blocked"
-    except Exception as e:
-        logger.error(f"Error sending approval DM: {e}")
-        dm_status = f"❌ Error: {str(e)}"
-    
-    # Send a follow-up message to the officer about DM status
-    try:
-        await interaction.followup.send(
-            f"**DM Notification Status:** {dm_status}",
-            ephemeral=True
-        )
-    except Exception as e:
-        logger.error(f"Could not send DM status follow-up: {e}")
-    
-    # Schedule channel deletion if requested
-    if delete_seconds is not None:
-        asyncio.create_task(schedule_channel_deletion(interaction.guild, application_record, delete_seconds))
-        time_duration = format_time_duration(delete_seconds)
-        logger.info(f"Application approved by {interaction.user.display_name} in {channel.name}. Channel scheduled for deletion in {time_duration}.")
-    else:
-        logger.info(f"Application approved by {interaction.user.display_name} in {channel.name}. Channel will remain open.")
 
 @bot.event
 async def on_message(message):
@@ -969,6 +981,21 @@ async def on_message(message):
     # Process DM messages for ongoing applications
     if isinstance(message.channel, discord.DMChannel):
         user_id = message.author.id
+        if user_id not in ongoing_applications:
+            try:
+                draft = get_application_store().get_draft(user_id)
+                if draft is not None:
+                    guild = bot.get_guild(draft["guild_id"])
+                    if guild is None:
+                        await message.author.send("Your saved application's server is unavailable. Please contact an officer.")
+                        return
+                    handler = ApplicationHandler(message.author, guild)
+                    handler.restore(draft)
+                    ongoing_applications[user_id] = handler
+            except Exception:
+                logger.exception("Could not restore application for %s", user_id)
+                await message.author.send("I couldn't load your saved application. Please try again later.")
+                return
         if user_id in ongoing_applications:
             application_handler = ongoing_applications[user_id]
             await application_handler.process_answer(message)
@@ -988,6 +1015,7 @@ async def on_ready():
         if guild.get_channel(int(INTERVIEW_CATEGORY_ID)) is not None:
             try:
                 await ensure_application_registry(guild)
+                restore_cleanup_tasks(guild)
             except Exception:
                 logger.exception("Application registry initialization failed for guild %s", guild.id)
     
