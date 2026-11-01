@@ -83,6 +83,15 @@ LOG_LEVEL="INFO"
 **Bot Settings:**
 - **APPLICATION_CHANNEL_PREFIX:** Channel name prefix (default: `application`)
 - **LOG_LEVEL:** Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`)
+- **APPLICATION_DB_PATH:** SQLite application registry (default: `data/applications.sqlite3`). Relative paths resolve from the repository root. Keep this file on persistent storage and back it up across restarts and deployments. SQLite is included with Python; no database service is needed.
+
+The bot runs as one process and records each application by server, channel, and immutable Discord user ID. Renaming a user or channel does not release the duplicate check. A retained channel continues to block reapplication after approval or rejection; the record is released only after the channel is confirmed deleted.
+
+On startup, existing channels in the interview category and channels elsewhere with the configured `application-` name prefix are checked for migration. They are imported only when their history contains one original application message from this bot, with a valid Discord ID and matching submission footer. History is checked beyond the latest 50 messages, so the bot needs Read Message History for these channels. Missing or forged application messages are never trusted by channel name. Ambiguous history, unavailable history, or a database error prevents application operations until an administrator resolves it. Keep the original messages during the first migration. Legacy channels that were both renamed and moved out of the category must be moved back for migration; channels whose original application message is missing require administrator review.
+
+Staff commands require a recorded, submitted application in the configured category. Scheduled deletion checks the current category and the same application record again before deleting. Moving a channel outside the category prevents automated cleanup, while its retained record still blocks reapplication. If publication fails after channel creation, the recorded channel continues to block duplicates and requires administrator review or deletion.
+
+Before requesting a new channel, the bot commits a reservation in SQLite. A timeout, crash, or database failure after that point keeps the applicant blocked even if the channel identity could not be saved. For recovery, stop the bot, confirm and remove any incomplete channel for that applicant, and remove only the matching `(guild_id, applicant_id)` row from the `application_reservations` table using a SQLite client. Preserve the other records and restart the bot. A definite Discord refusal (such as missing permissions) automatically releases the reservation.
 
 ### 4. Invite Bot to Server
 
@@ -286,10 +295,19 @@ This checks:
 - **Language:** Python 3.8+
 - **Library:** discord.py 2.3.0+
 - **Architecture:** Event-driven with DM-based conversation flow
-- **Storage:** In-memory with automatic cleanup (no database required)
+- **Storage:** SQLite for application identities; in-memory sessions and deletion timers. Run one bot process per registry. Deletion timers still need to be scheduled again after a restart.
 - **Permissions:** Standard bot permissions (no privileged intents)
 
 ## 🤝 Contributing
+
+Run the offline regression suite with the dependencies installed:
+
+```bash
+python -m unittest -v test_application_security
+python test_bot_fixes.py
+```
+
+The security tests call the real bot handlers using temporary SQLite files and mocked Discord I/O; they do not connect to Discord.
 
 1. Fork the repository
 2. Create a feature branch

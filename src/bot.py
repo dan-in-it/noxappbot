@@ -4,7 +4,9 @@ import os
 import logging
 import asyncio
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from dotenv import load_dotenv
+from application_store import ApplicationRecord, ApplicationStore
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -48,6 +50,117 @@ questions = [
 
 # Store ongoing applications
 ongoing_applications = {}
+_application_store = None
+_registry_ready = set()
+_registry_locks = {}
+
+
+class ApplicationRegistryError(Exception):
+    """The bot cannot establish a trusted application identity."""
+
+
+def get_application_store():
+    global _application_store
+    if _application_store is None:
+        path = Path(os.getenv("APPLICATION_DB_PATH", "data/applications.sqlite3")).expanduser()
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parent.parent / path
+        _application_store = ApplicationStore(path)
+    return _application_store
+
+
+async def legacy_application_record(channel):
+    """Adopt only an unambiguous original application posted by this bot."""
+    record = None
+    async for message in channel.history(limit=None, oldest_first=True):
+        if message.author.id != channel.guild.me.id or message.webhook_id is not None:
+            continue
+        for embed in message.embeds:
+            if not (embed.title or "").startswith("New Application from "):
+                continue
+            ids = [field.value for field in embed.fields if field.name == "Discord ID"]
+            if len(ids) != 1 or not ids[0].isascii() or not ids[0].isdecimal():
+                raise ApplicationRegistryError(f"Invalid application identity in channel {channel.id}")
+            applicant_id = int(ids[0])
+            footer = embed.footer.text or ""
+            if (not 0 < applicant_id < 2**63
+                    or not footer.startswith("Application submitted by ")
+                    or not footer.endswith(f" ({applicant_id})") or record is not None):
+                raise ApplicationRegistryError(f"Ambiguous application history in channel {channel.id}")
+            record = ApplicationRecord(channel.guild.id, channel.id, applicant_id, message.id)
+    return record
+
+
+async def ensure_application_registry(guild):
+    """Migrate existing channels once per process, before accepting applications."""
+    if guild.id in _registry_ready:
+        return
+    lock = _registry_locks.setdefault(guild.id, asyncio.Lock())
+    async with lock:
+        if guild.id in _registry_ready:
+            return
+        store = get_application_store()
+        channels = await guild.fetch_channels()
+        category_id = int(INTERVIEW_CATEGORY_ID)
+        if not any(isinstance(channel, discord.CategoryChannel) and channel.id == category_id
+                   for channel in channels):
+            raise ApplicationRegistryError("Interview category not found in this server")
+        for channel in channels:
+            # Old applications may have been moved before this registry existed.
+            # Their generated names locate migration candidates; only the original
+            # bot-authored message establishes identity, and decisions still require
+            # the current interview category.
+            if (isinstance(channel, discord.TextChannel)
+                    and (channel.category_id == category_id
+                         or channel.name.startswith(f"{APPLICATION_CHANNEL_PREFIX.lower()}-"))
+                    and store.get(guild.id, channel.id) is None):
+                record = await legacy_application_record(channel)
+                if record is not None:
+                    store.add(record)
+        # A failed history/API/DB read must leave migration incomplete and retryable.
+        _registry_ready.add(guild.id)
+
+
+async def existing_application_channel(guild, applicant_id):
+    await ensure_application_registry(guild)
+    store = get_application_store()
+    for record in store.for_applicant(guild.id, applicant_id):
+        try:
+            return await guild.fetch_channel(record.channel_id)
+        except discord.NotFound as error:
+            if error.code != 10003:  # Only a confirmed Unknown Channel releases the record.
+                raise
+            store.remove(record)
+    if store.has_reservation(guild.id, applicant_id):
+        raise ApplicationRegistryError("An earlier submission needs administrator review")
+    return None
+
+
+async def verified_application_channel(guild, channel_id, expected=None):
+    await ensure_application_registry(guild)
+    record = get_application_store().get(guild.id, channel_id)
+    if record is None or record.message_id is None or (expected is not None and record != expected):
+        raise ApplicationRegistryError("Channel has no matching submitted application record")
+    channel = await guild.fetch_channel(channel_id)
+    if (not isinstance(channel, discord.TextChannel) or channel.guild.id != record.guild_id
+            or channel.category_id != int(INTERVIEW_CATEGORY_ID)
+            or get_application_store().get(guild.id, channel_id) != record):
+        raise ApplicationRegistryError("Application channel is outside the configured interview category")
+    return channel, record
+
+
+async def prepare_application_decision(interaction):
+    # Verification can read legacy history or call Discord; acknowledge promptly.
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        return await verified_application_channel(interaction.guild, interaction.channel.id)
+    except Exception:
+        logger.exception("Could not verify application channel %s", interaction.channel.id)
+        await interaction.followup.send(
+            "❌ This channel could not be verified as a submitted application in the interview category. "
+            "Please contact an administrator.", ephemeral=True
+        )
+        return None
 
 class ApplicationHandler:
     def __init__(self, user, guild):
@@ -55,15 +168,34 @@ class ApplicationHandler:
         self.guild = guild
         self.answers = []
         self.current_question = 0
+        self.lock = asyncio.Lock()
+        self.state = "starting"
+
+    def is_current(self):
+        return ongoing_applications.get(self.user.id) is self
+
+    def release(self):
+        if self.is_current():
+            del ongoing_applications[self.user.id]
         
     async def start_application(self):
         """Start the application process by sending the first question"""
-        try:
-            await self.send_current_question()
-        except discord.Forbidden:
-            logger.error(f"Cannot send DM to {self.user.display_name}")
-            return False
-        return True
+        async with self.lock:
+            if not self.is_current() or self.state != "starting":
+                return False
+            self.state = "active"
+            try:
+                await self.send_current_question()
+            except discord.Forbidden:
+                self.state = "failed"
+                self.release()
+                logger.error(f"Cannot send DM to {self.user.display_name}")
+                return False
+            except Exception:
+                self.state = "failed"
+                self.release()
+                raise
+            return True
     
     async def send_current_question(self):
         """Send the current question to the user"""
@@ -80,12 +212,18 @@ class ApplicationHandler:
             
             await self.user.send(embed=embed)
         else:
-            await self.complete_application()
+            await self._complete_application()
     
     async def process_answer(self, message):
         """Process the user's answer and move to next question"""
+        async with self.lock:
+            if not self.is_current() or self.state != "active":
+                return
+            await self._process_answer(message)
+
+    async def _process_answer(self, message):
         if message.content.lower() == 'cancel':
-            await self.cancel_application()
+            await self._cancel_application()
             return
         
         # Handle "proceed" command for long answers
@@ -135,7 +273,7 @@ class ApplicationHandler:
         if self.current_question < len(questions):
             await self.send_current_question()
         else:
-            await self.complete_application()
+            await self._complete_application()
     
     def validate_and_truncate_answer(self, content):
         """Validate and truncate answer to prevent Discord limits"""
@@ -196,6 +334,13 @@ class ApplicationHandler:
     
     async def cancel_application(self):
         """Cancel the application process"""
+        async with self.lock:
+            if self.is_current() and self.state == "active":
+                await self._cancel_application()
+
+    async def _cancel_application(self):
+        self.state = "cancelled"
+        self.release()
         embed = discord.Embed(
             title="Application Cancelled",
             description="Your guild application has been cancelled. You can start a new application anytime by clicking the Apply button again.",
@@ -203,16 +348,23 @@ class ApplicationHandler:
         )
         await self.user.send(embed=embed)
         
-        # Remove from ongoing applications
-        if self.user.id in ongoing_applications:
-            del ongoing_applications[self.user.id]
-    
     async def complete_application(self):
         """Complete the application and create the channel"""
+        async with self.lock:
+            await self._complete_application()
+
+    async def _complete_application(self):
+        if not self.is_current() or self.state != "active":
+            return
+        self.state = "finalizing"
         try:
+            existing_channel = await existing_application_channel(self.guild, self.user.id)
+            if existing_channel is not None:
+                await self.user.send(f"You already have an application channel: {existing_channel.mention}")
+                return
             # INTERVIEW_CATEGORY_ID is guaranteed to be non-None due to startup validation
             category_id = int(INTERVIEW_CATEGORY_ID)  # type: ignore
-            category = self.guild.get_channel(category_id)
+            category = await self.guild.fetch_channel(category_id)
             
             if not category or not isinstance(category, discord.CategoryChannel):
                 await self.user.send("❌ Interview category not found. Please contact an officer.")
@@ -252,11 +404,26 @@ class ApplicationHandler:
                     logger.error(f"Invalid ADMIN_ROLE_ID: {ADMIN_ROLE_ID} (must be numeric)")
             
             # Create the channel
-            interview_channel = await self.guild.create_text_channel(
-                name=channel_name,
-                category=category,
-                overwrites=overwrites,
-            )
+            if not self.is_current() or self.state != "finalizing":
+                return
+            store = get_application_store()
+            reservation = store.reserve(self.guild.id, self.user.id)
+            try:
+                interview_channel = await self.guild.create_text_channel(
+                    name=channel_name,
+                    category=category,
+                    overwrites=overwrites,
+                )
+            except discord.HTTPException as error:
+                # Discord definitively refused these requests. Timeouts, server
+                # errors and process crashes can leave a channel, so keep their
+                # durable reservation until an administrator reconciles it.
+                if error.status in (400, 401, 403, 404):
+                    store.release_reservation(self.guild.id, self.user.id, reservation)
+                raise
+            record = ApplicationRecord(self.guild.id, interview_channel.id, self.user.id)
+            # Retain the identity even if publishing the embed or sending the DM fails.
+            store.record_created(record, reservation)
             
             # Create and send application embed with safety checks
             embed = discord.Embed(
@@ -298,10 +465,12 @@ class ApplicationHandler:
             embed.set_footer(text=f"Application submitted by {self.user} ({self.user.id})")
             
             # Send the embed with mentions
-            await interview_channel.send(
+            application_message = await interview_channel.send(
                 content=f"{self.user.mention} <@&616354080704430130>",
                 embed=embed
             )
+            get_application_store().mark_submitted(record, application_message.id)
+            self.state = "completed"
             
             # Notify user of completion
             completion_embed = discord.Embed(
@@ -320,9 +489,9 @@ class ApplicationHandler:
             await self.user.send("❌ There was an error processing your application. Please contact an administrator.")
             logger.error(f"Error completing application for {self.user.display_name}: {e}")
         finally:
-            # Remove from ongoing applications
-            if self.user.id in ongoing_applications:
-                del ongoing_applications[self.user.id]
+            if self.state == "finalizing":
+                self.state = "failed"
+            self.release()
 
 class ApplicationView(discord.ui.View):
     def __init__(self):
@@ -333,16 +502,9 @@ class ApplicationView(discord.ui.View):
         user = interaction.user
         guild = interaction.guild
         
-        # Check if user already has an application channel
-        if guild:
-            channel_name = f"{APPLICATION_CHANNEL_PREFIX}-{user.name.lower()}"
-            existing_channel = discord.utils.get(guild.channels, name=channel_name)
-            if existing_channel:
-                await interaction.response.send_message(
-                    f"You already have an application channel: {existing_channel.mention}",
-                    ephemeral=True
-                )
-                return
+        if guild is None:
+            await interaction.response.send_message("❌ Applications must be started in a server.", ephemeral=True)
+            return
         
         # Check if user already has an ongoing application
         if user.id in ongoing_applications:
@@ -352,25 +514,34 @@ class ApplicationView(discord.ui.View):
             )
             return
         
-        # Start the application process
+        # Reserve before the first await: duplicate Apply events must share one owner.
         application_handler = ApplicationHandler(user, guild)
         ongoing_applications[user.id] = application_handler
-        
-        success = await application_handler.start_application()
-        
-        if success:
-            await interaction.response.send_message(
-                "✅ Application started! Please check your DMs to continue with the questions.",
-                ephemeral=True
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            existing_channel = await existing_application_channel(guild, user.id)
+            if existing_channel is not None:
+                await interaction.followup.send(
+                    f"You already have an application channel: {existing_channel.mention}", ephemeral=True
+                )
+                return
+            success = await application_handler.start_application()
+            if success:
+                await interaction.followup.send(
+                    "✅ Application started! Please check your DMs to continue with the questions.", ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    "❌ I couldn't send you a DM. Please make sure your DMs are open and try again.", ephemeral=True
+                )
+        except Exception:
+            logger.exception("Could not start application for %s", user.id)
+            await interaction.followup.send(
+                "❌ I couldn't verify your application status. Please contact an administrator.", ephemeral=True
             )
-        else:
-            # Remove from ongoing applications if failed to start
-            if user.id in ongoing_applications:
-                del ongoing_applications[user.id]
-            await interaction.response.send_message(
-                "❌ I couldn't send you a DM. Please make sure your DMs are open and try again.",
-                ephemeral=True
-            )
+        finally:
+            if application_handler.state not in ("active", "finalizing"):
+                application_handler.release()
 
 def parse_time_string(time_str):
     """Parse time string like '10m', '1h', '30m', '2h' into seconds"""
@@ -414,15 +585,20 @@ def format_time_duration(seconds):
         hours = seconds // 3600
         return f"{hours} hour{'s' if hours != 1 else ''}"
 
-async def schedule_channel_deletion(channel, delay_seconds):
+async def schedule_channel_deletion(guild, record, delay_seconds):
     """Schedule a channel for deletion after a specified delay in seconds"""
     try:
         await asyncio.sleep(delay_seconds)
-        if channel:
-            await channel.delete(reason="Application processed - automatic cleanup")
-            logger.info(f"Deleted application channel: {channel.name}")
-    except discord.NotFound:
-        logger.info(f"Channel was already deleted")
+        channel, _ = await verified_application_channel(guild, record.channel_id, expected=record)
+        await channel.delete(reason="Application processed - automatic cleanup")
+        get_application_store().remove(record)
+        logger.info(f"Deleted application channel: {channel.name}")
+    except discord.NotFound as error:
+        if error.code == 10003:
+            get_application_store().remove(record)
+            logger.info("Application channel %s was already deleted", record.channel_id)
+        else:
+            logger.exception("Could not confirm application channel deletion")
     except Exception as e:
         logger.error(f"Error deleting channel: {e}")
 
@@ -507,13 +683,6 @@ async def reject_application(
         )
         return
     
-    if not channel.name.startswith(APPLICATION_CHANNEL_PREFIX):
-        await interaction.response.send_message(
-            f"❌ This command can only be used in application channels (channels starting with '{APPLICATION_CHANNEL_PREFIX}').",
-            ephemeral=True
-        )
-        return
-    
     # Parse and validate delete_time if provided
     delete_seconds = None
     if delete_time is not None:
@@ -525,8 +694,11 @@ async def reject_application(
             )
             return
     
-    # Extract applicant name from channel name
-    applicant_name = channel.name.replace(f"{APPLICATION_CHANNEL_PREFIX}-", "").replace("-", " ").title()
+    verified = await prepare_application_decision(interaction)
+    if verified is None:
+        return
+    channel, application_record = verified
+    applicant_name = f"<@{application_record.applicant_id}>"
     
     # Create rejection embed
     rejection_embed = discord.Embed(
@@ -551,81 +723,51 @@ async def reject_application(
             inline=False
         )
     
-    await interaction.response.send_message(embed=rejection_embed)
+    await channel.send(embed=rejection_embed)
     
     # Try to notify the applicant via DM
     dm_status = "❌ Failed to send DM"
     try:
-        # Find the applicant by extracting Discord ID from the application embed
+        applicant_id = application_record.applicant_id
+        # Try to get the applicant user object using the ID
         applicant = None
-        applicant_id = None
-        
-        logger.info(f"Looking for application embed in channel {channel.name}")
-        
-        # Look for the application embed in the channel
-        async for message in channel.history(limit=50):
-            if message.embeds and message.author == interaction.guild.me:
-                embed = message.embeds[0]
-                logger.info(f"Found embed with title: {embed.title}")
-                if embed.title and "Application from" in embed.title:
-                    logger.info(f"Found application embed, checking for Discord ID field")
-                    # Look for Discord ID field in the embed
-                    for field in embed.fields:
-                        logger.info(f"Checking field: {field.name} = {field.value}")
-                        if field.name == "Discord ID" and field.value:
-                            try:
-                                applicant_id = int(field.value)
-                                logger.info(f"Extracted applicant ID: {applicant_id}")
-                                break
-                            except ValueError:
-                                logger.error(f"Could not parse Discord ID: {field.value}")
-                                continue
-                    if applicant_id:
-                        break
-        
-        if not applicant_id:
-            logger.error(f"Could not find Discord ID in application embed for channel {channel.name}")
-            dm_status = "❌ Could not find applicant Discord ID"
-        else:
-            # Try to get the applicant user object using the ID
-            applicant = None
-            try:
-                # First try to get from guild cache
-                applicant = interaction.guild.get_member(applicant_id)
-                if applicant:
-                    logger.info(f"Found applicant in guild cache: {applicant.display_name} ({applicant.id})")
-                else:
-                    # If not in cache, fetch directly from Discord API
-                    logger.info(f"Member not in cache, fetching from Discord API...")
-                    applicant = await bot.fetch_user(applicant_id)
-                    logger.info(f"Fetched applicant from API: {applicant.display_name} ({applicant.id})")
-            except discord.NotFound:
-                logger.error(f"User with ID {applicant_id} not found on Discord")
-                dm_status = "❌ User not found on Discord"
-                applicant = None
-            except Exception as e:
-                logger.error(f"Error fetching user {applicant_id}: {e}")
-                dm_status = f"❌ Error fetching user: {str(e)}"
-                applicant = None
-            
+        try:
+            # First try to get from guild cache
+            applicant = interaction.guild.get_member(applicant_id)
             if applicant:
-                dm_embed = discord.Embed(
-                    title="Application Update",
-                    description=f"Your application to **{interaction.guild.name}** has been reviewed.",
-                    color=discord.Color.red()
-                )
-                dm_embed.add_field(name="Status", value="❌ Rejected", inline=True)
-                dm_embed.add_field(name="Reason", value=reason, inline=False)
-                dm_embed.add_field(
-                    name="What's Next?",
-                    value="You're welcome to apply again in the future. Feel free to reach out to our officers if you have any questions.",
-                    inline=False
-                )
-                
-                await applicant.send(embed=dm_embed)
-                logger.info(f"Successfully sent rejection notification to {applicant.display_name}")
-                dm_status = "✅ DM sent successfully"
-            
+                logger.info(f"Found applicant in guild cache: {applicant.display_name} ({applicant.id})")
+            else:
+                # If not in cache, fetch directly from Discord API
+                logger.info(f"Member not in cache, fetching from Discord API...")
+                applicant = await bot.fetch_user(applicant_id)
+                logger.info(f"Fetched applicant from API: {applicant.display_name} ({applicant.id})")
+        except discord.NotFound:
+            logger.error(f"User with ID {applicant_id} not found on Discord")
+            dm_status = "❌ User not found on Discord"
+            applicant = None
+        except Exception as e:
+            logger.error(f"Error fetching user {applicant_id}: {e}")
+            dm_status = f"❌ Error fetching user: {str(e)}"
+            applicant = None
+        
+        if applicant:
+            dm_embed = discord.Embed(
+                title="Application Update",
+                description=f"Your application to **{interaction.guild.name}** has been reviewed.",
+                color=discord.Color.red()
+            )
+            dm_embed.add_field(name="Status", value="❌ Rejected", inline=True)
+            dm_embed.add_field(name="Reason", value=reason, inline=False)
+            dm_embed.add_field(
+                name="What's Next?",
+                value="You're welcome to apply again in the future. Feel free to reach out to our officers if you have any questions.",
+                inline=False
+            )
+
+            await applicant.send(embed=dm_embed)
+            logger.info(f"Successfully sent rejection notification to {applicant.display_name}")
+            dm_status = "✅ DM sent successfully"
+        
     except discord.Forbidden:
         logger.warning(f"Could not send DM to applicant - DMs may be disabled")
         dm_status = "❌ DMs disabled or blocked"
@@ -644,7 +786,7 @@ async def reject_application(
     
     # Schedule channel deletion if requested
     if delete_seconds is not None:
-        asyncio.create_task(schedule_channel_deletion(channel, delete_seconds))
+        asyncio.create_task(schedule_channel_deletion(interaction.guild, application_record, delete_seconds))
         time_duration = format_time_duration(delete_seconds)
         logger.info(f"Application rejected by {interaction.user.display_name} in {channel.name}. Channel scheduled for deletion in {time_duration}.")
     else:
@@ -703,13 +845,6 @@ async def approve_application(
         )
         return
     
-    if not channel.name.startswith(APPLICATION_CHANNEL_PREFIX):
-        await interaction.response.send_message(
-            f"❌ This command can only be used in application channels (channels starting with '{APPLICATION_CHANNEL_PREFIX}').",
-            ephemeral=True
-        )
-        return
-    
     # Parse and validate delete_time if provided
     delete_seconds = None
     if delete_time is not None:
@@ -721,8 +856,11 @@ async def approve_application(
             )
             return
     
-    # Extract applicant name from channel name
-    applicant_name = channel.name.replace(f"{APPLICATION_CHANNEL_PREFIX}-", "").replace("-", " ").title()
+    verified = await prepare_application_decision(interaction)
+    if verified is None:
+        return
+    channel, application_record = verified
+    applicant_name = f"<@{application_record.applicant_id}>"
     
     # Create acceptance embed
     acceptance_embed = discord.Embed(
@@ -753,81 +891,51 @@ async def approve_application(
             inline=False
         )
     
-    await interaction.response.send_message(embed=acceptance_embed)
+    await channel.send(embed=acceptance_embed)
     
     # Try to notify the applicant via DM
     dm_status = "❌ Failed to send DM"
     try:
-        # Find the applicant by extracting Discord ID from the application embed
+        applicant_id = application_record.applicant_id
+        # Try to get the applicant user object using the ID
         applicant = None
-        applicant_id = None
-        
-        logger.info(f"Looking for application embed in channel {channel.name}")
-        
-        # Look for the application embed in the channel
-        async for message in channel.history(limit=50):
-            if message.embeds and message.author == interaction.guild.me:
-                embed = message.embeds[0]
-                logger.info(f"Found embed with title: {embed.title}")
-                if embed.title and "Application from" in embed.title:
-                    logger.info(f"Found application embed, checking for Discord ID field")
-                    # Look for Discord ID field in the embed
-                    for field in embed.fields:
-                        logger.info(f"Checking field: {field.name} = {field.value}")
-                        if field.name == "Discord ID" and field.value:
-                            try:
-                                applicant_id = int(field.value)
-                                logger.info(f"Extracted applicant ID: {applicant_id}")
-                                break
-                            except ValueError:
-                                logger.error(f"Could not parse Discord ID: {field.value}")
-                                continue
-                    if applicant_id:
-                        break
-        
-        if not applicant_id:
-            logger.error(f"Could not find Discord ID in application embed for channel {channel.name}")
-            dm_status = "❌ Could not find applicant Discord ID"
-        else:
-            # Try to get the applicant user object using the ID
-            applicant = None
-            try:
-                # First try to get from guild cache
-                applicant = interaction.guild.get_member(applicant_id)
-                if applicant:
-                    logger.info(f"Found applicant in guild cache: {applicant.display_name} ({applicant.id})")
-                else:
-                    # If not in cache, fetch directly from Discord API
-                    logger.info(f"Member not in cache, fetching from Discord API...")
-                    applicant = await bot.fetch_user(applicant_id)
-                    logger.info(f"Fetched applicant from API: {applicant.display_name} ({applicant.id})")
-            except discord.NotFound:
-                logger.error(f"User with ID {applicant_id} not found on Discord")
-                dm_status = "❌ User not found on Discord"
-                applicant = None
-            except Exception as e:
-                logger.error(f"Error fetching user {applicant_id}: {e}")
-                dm_status = f"❌ Error fetching user: {str(e)}"
-                applicant = None
-            
+        try:
+            # First try to get from guild cache
+            applicant = interaction.guild.get_member(applicant_id)
             if applicant:
-                dm_embed = discord.Embed(
-                    title="🎉 Application Approved!",
-                    description=f"Congratulations! Your application to **{interaction.guild.name}** has been approved!",
-                    color=discord.Color.green()
-                )
-                dm_embed.add_field(name="Status", value="✅ Approved", inline=True)
-                dm_embed.add_field(name="Welcome Message", value=welcome_message, inline=False)
-                dm_embed.add_field(
-                    name="What's Next?",
-                    value="You should now have access to the guild! Check out the guild channels and feel free to introduce yourself.",
-                    inline=False
-                )
-                
-                await applicant.send(embed=dm_embed)
-                logger.info(f"Successfully sent approval notification to {applicant.display_name}")
-                dm_status = "✅ DM sent successfully"
-            
+                logger.info(f"Found applicant in guild cache: {applicant.display_name} ({applicant.id})")
+            else:
+                # If not in cache, fetch directly from Discord API
+                logger.info(f"Member not in cache, fetching from Discord API...")
+                applicant = await bot.fetch_user(applicant_id)
+                logger.info(f"Fetched applicant from API: {applicant.display_name} ({applicant.id})")
+        except discord.NotFound:
+            logger.error(f"User with ID {applicant_id} not found on Discord")
+            dm_status = "❌ User not found on Discord"
+            applicant = None
+        except Exception as e:
+            logger.error(f"Error fetching user {applicant_id}: {e}")
+            dm_status = f"❌ Error fetching user: {str(e)}"
+            applicant = None
+        
+        if applicant:
+            dm_embed = discord.Embed(
+                title="🎉 Application Approved!",
+                description=f"Congratulations! Your application to **{interaction.guild.name}** has been approved!",
+                color=discord.Color.green()
+            )
+            dm_embed.add_field(name="Status", value="✅ Approved", inline=True)
+            dm_embed.add_field(name="Welcome Message", value=welcome_message, inline=False)
+            dm_embed.add_field(
+                name="What's Next?",
+                value="You should now have access to the guild! Check out the guild channels and feel free to introduce yourself.",
+                inline=False
+            )
+
+            await applicant.send(embed=dm_embed)
+            logger.info(f"Successfully sent approval notification to {applicant.display_name}")
+            dm_status = "✅ DM sent successfully"
+        
     except discord.Forbidden:
         logger.warning(f"Could not send DM to applicant - DMs may be disabled")
         dm_status = "❌ DMs disabled or blocked"
@@ -846,7 +954,7 @@ async def approve_application(
     
     # Schedule channel deletion if requested
     if delete_seconds is not None:
-        asyncio.create_task(schedule_channel_deletion(channel, delete_seconds))
+        asyncio.create_task(schedule_channel_deletion(interaction.guild, application_record, delete_seconds))
         time_duration = format_time_duration(delete_seconds)
         logger.info(f"Application approved by {interaction.user.display_name} in {channel.name}. Channel scheduled for deletion in {time_duration}.")
     else:
@@ -875,6 +983,13 @@ async def on_ready():
         logger.info(f'Bot logged in as {bot.user.name} (ID: {bot.user.id})')
     else:
         logger.info('Bot logged in')
+
+    for guild in bot.guilds:
+        if guild.get_channel(int(INTERVIEW_CATEGORY_ID)) is not None:
+            try:
+                await ensure_application_registry(guild)
+            except Exception:
+                logger.exception("Application registry initialization failed for guild %s", guild.id)
     
     # Sync slash commands
     try:
@@ -888,5 +1003,5 @@ async def on_ready():
     
     logger.info('Application bot is ready and listening for applications')
 
-bot.run(TOKEN)
-
+if __name__ == "__main__":
+    bot.run(TOKEN)
