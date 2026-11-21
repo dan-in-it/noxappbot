@@ -104,6 +104,21 @@ async def legacy_application_record(channel):
     return record
 
 
+async def fetch_registry_channels(guild):
+    # Guild.fetch_channels() rejects the entire REST response on an unfamiliar
+    # type. Use the same authenticated, rate-limited transport, but only decode
+    # the types the registry inspects. Never substitute an incomplete cache.
+    state = guild._state
+    rows = await state.http.get_all_guild_channels(guild.id)
+    models = {
+        discord.ChannelType.category.value: discord.CategoryChannel,
+        discord.ChannelType.text.value: discord.TextChannel,
+        discord.ChannelType.news.value: discord.TextChannel,
+    }
+    return [models[row["type"]](guild=guild, state=state, data=row)
+            for row in rows if row["type"] in models]
+
+
 async def ensure_application_registry(guild):
     """Migrate existing channels once per process, before accepting applications."""
     if guild.id in _registry_ready:
@@ -113,7 +128,7 @@ async def ensure_application_registry(guild):
         if guild.id in _registry_ready:
             return
         store = get_application_store()
-        channels = await guild.fetch_channels()
+        channels = await fetch_registry_channels(guild)
         category_id = int(INTERVIEW_CATEGORY_ID)
         if not any(isinstance(channel, discord.CategoryChannel) and channel.id == category_id
                    for channel in channels):
@@ -132,6 +147,7 @@ async def ensure_application_registry(guild):
                     store.add(record)
         # A failed history/API/DB read must leave migration incomplete and retryable.
         _registry_ready.add(guild.id)
+        logger.info("Application registry ready for guild %s", guild.id)
 
 
 async def existing_application_channel(guild, applicant_id):

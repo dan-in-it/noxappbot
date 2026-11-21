@@ -74,7 +74,7 @@ class ApplicationTestCase(unittest.IsolatedAsyncioTestCase):
         self.guild.me.guild_permissions.manage_roles = True
         self.guild.default_role = MagicMock(spec=discord.Role)
         self.category = MagicMock(spec=discord.CategoryChannel)
-        self.category.id = 10
+        self.category.id, self.category.name = 10, "interviews"
         self.category.guild = self.guild
         self.channels = {10: self.category}
         self.guild.channels = [self.category]
@@ -89,7 +89,23 @@ class ApplicationTestCase(unittest.IsolatedAsyncioTestCase):
         self.guild.get_role.side_effect = lambda role_id: next(
             (role for role in self.approval_roles if role.id == role_id), MagicMock(spec=discord.Role))
         self.guild.fetch_member.side_effect = lambda user_id: self.applicant
-        self.guild.fetch_channels.side_effect = lambda: list(self.channels.values())
+        # Exercise discord.py's real channel decoder; mock only the REST response
+        # and message history, not the list of channels that migration sees.
+        self.extra_channel_rows = []
+        self.guild._state = SimpleNamespace(http=SimpleNamespace(
+            get_all_guild_channels=AsyncMock(side_effect=lambda gid: [
+                {"id": str(ch.id), "name": ch.name, "position": 0,
+                 "type": 4 if ch is self.category else ch.type.value,
+                 "parent_id": None if ch is self.category else str(ch.category_id)}
+                for ch in self.channels.values()
+            ] + self.extra_channel_rows)))
+        async def fetch_channels():
+            return await discord.Guild.fetch_channels(self.guild)
+        self.guild.fetch_channels.side_effect = fetch_channels
+        history_context = patch.object(discord.TextChannel, "history", lambda ch, **kw:
+                                       self.channels[ch.id].history(**kw))
+        history_context.start()
+        self.addCleanup(history_context.stop)
 
         async def fetch(channel_id):
             if channel_id not in self.channels:
@@ -122,6 +138,7 @@ class ApplicationTestCase(unittest.IsolatedAsyncioTestCase):
 
     def channel(self, channel_id=2000, name="application-archive", category_id=10):
         channel = MagicMock(spec=discord.TextChannel)
+        channel.type = discord.ChannelType.text
         channel.id, channel.name, channel.category_id = channel_id, name, category_id
         channel.guild, channel.mention = self.guild, f"<#{channel_id}>"
         channel.category = self.category if category_id == 10 else SimpleNamespace(id=category_id)
@@ -321,6 +338,13 @@ class ApplicationSecurityTests(ApplicationTestCase):
                 self.assertNotIn(self.applicant.id, subject.ongoing_applications)
                 self.guild.create_text_channel.assert_not_awaited()
 
+    async def test_apply_starts_with_unknown_channel_type_in_guild(self):
+        self.extra_channel_rows.append({"id": "8000", "type": 20})
+        interaction = self.interaction()
+        await subject.ApplicationView().apply.callback(interaction)
+        self.assertIn("ready in your DMs", interaction.followup.send.call_args.args[0])
+        self.applicant.send.assert_awaited()
+
     async def test_legacy_message_beyond_latest_fifty_is_adopted(self):
         channel = self.channel()
         original = self.legacy_message(channel)
@@ -387,7 +411,9 @@ class ApplicationSecurityTests(ApplicationTestCase):
         self.assertNotIn(1001, subject.ongoing_applications)
 
     async def test_moved_legacy_channel_blocks_reapplication_but_not_authorized_for_decisions(self):
+        self.extra_channel_rows.append({"id": "8000", "type": 20})
         channel = self.channel(category_id=99)
+        channel.type = discord.ChannelType.news
         self.legacy_message(channel)
         self.applicant.name = "renamedapplicant"
         await self.submit()
